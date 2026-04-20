@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
 import { BitmapLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { HilbertCurve } from '../utils/hilbert';
@@ -17,13 +17,36 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
     const [viewMode, setViewMode] = useState<'HILBERT' | 'LINEAR'>('HILBERT');
     const [zoom, setZoom] = useState(0);
 
+    // Deck.gl BitmapLayer expects RGBA (4 channels). Expand the single-channel WASM buffer into RGBA.
+    const rgbaMatrix = useMemo(() => {
+        const pixelCount = 512 * 512;
+        const out = new Uint8Array(pixelCount * 4);
+        const len = Math.min(matrix.length, pixelCount);
+
+        for (let i = 0; i < len; i++) {
+            const v = matrix[i];
+            const o = i * 4;
+            out[o] = v;       // R
+            out[o + 1] = v;   // G
+            out[o + 2] = v;   // B
+            out[o + 3] = 255; // A
+        }
+
+        // If matrix is shorter than expected, remaining pixels stay black/transparent-safe (A=0 by default).
+        for (let i = len; i < pixelCount; i++) {
+            out[i * 4 + 3] = 255;
+        }
+
+        return out;
+    }, [matrix]);
+
     const getHilbertLayers = () => {
         const layers: any[] = [
             new BitmapLayer({
-                id: 'hilbert-bitmap', image: { width: 512, height: 512, data: matrix },
+                id: 'hilbert-bitmap', image: { width: 512, height: 512, data: rgbaMatrix },
                 bounds: [0, 0, 512, 512], pickable: true,
-                onClick: (info) => {
-                    if (info.bitmapPixel) onJump(hilbert.xyToOffset(info.bitmapPixel[0], info.bitmapPixel[1]));
+                onClick: (info: any) => {
+                    if (info?.bitmapPixel) onJump(hilbert.xyToOffset(info.bitmapPixel[0], info.bitmapPixel[1]));
                 }
             })
         ];
@@ -103,8 +126,8 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
             <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
                 {viewMode === 'HILBERT' ? (
                     <DeckGL
-                        viewState={{ target: [256, 256, 0], zoom: zoom, minZoom: -2, maxZoom: 10 }}
-                        onViewStateChange={({ viewState }) => setZoom(viewState.zoom)}
+                        viewState={{ target: [256, 256, 0], zoom, minZoom: -2, maxZoom: 10 } as any}
+                        onViewStateChange={({ viewState }: any) => setZoom(viewState.zoom)}
                         controller={true}
                         layers={getHilbertLayers()}
                         getCursor={() => 'crosshair'}

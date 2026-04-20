@@ -1,11 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { AnalysisResult, TlvNode } from '../types/analysis';
-
-// Standard dynamic import for the WASM module
-const importWasm = async () => {
-    // @ts-ignore
-    return import('../../src-wasm/pkg/cifad_wasm');
-};
+import { AnalysisResult } from '../types/analysis';
 
 export const useAnalysisEngine = () => {
     const [isReady, setIsReady] = useState(false);
@@ -13,18 +7,61 @@ export const useAnalysisEngine = () => {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
 
     useEffect(() => {
-        const initWasm = async () => {
-            try {
-                const wasm = await importWasm();
-                if (wasm.default && typeof wasm.default === 'function') {
-                    await wasm.default(); // Initialize WASM memory
-                }
-                setIsReady(true);
-            } catch (e) {
-                console.error("Failed to initialize WASM engine:", e);
+        let isDisposed = false;
+        const worker = new Worker(new URL('../workers/analysis.worker.ts', import.meta.url), { type: 'module' });
+        let nextId = 1;
+        const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+
+        const send = (msg: any) => {
+            worker.postMessage(msg);
+        };
+
+        worker.onmessage = (evt: MessageEvent<any>) => {
+            const msg = evt.data;
+            const id = msg?.id;
+
+            if (msg?.type === 'ready') {
+                if (!isDisposed) setIsReady(true);
+                return;
+            }
+
+            if (typeof id !== 'number') return;
+            const p = pending.get(id);
+            if (!p) return;
+
+            if (msg.type === 'result') {
+                pending.delete(id);
+                p.resolve(msg.result);
+            } else if (msg.type === 'error') {
+                pending.delete(id);
+                const err = new Error(msg?.error?.message ?? 'Worker error');
+                (err as any).stack = msg?.error?.stack;
+                p.reject(err);
             }
         };
-        initWasm();
+
+        send({ type: 'init', id: nextId++ });
+
+        // Stash worker + request helper on the function object via closure.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (useAnalysisEngine as any).__worker = worker;
+        (useAnalysisEngine as any).__request = (file: File) => {
+            const id = nextId++;
+            return new Promise<any>((resolve, reject) => {
+                pending.set(id, { resolve, reject });
+                send({ type: 'analyze', id, file });
+            });
+        };
+
+        return () => {
+            isDisposed = true;
+            pending.clear();
+            worker.terminate();
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (useAnalysisEngine as any).__worker = null;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (useAnalysisEngine as any).__request = null;
+        };
     }, []);
 
     const analyzeFile = useCallback(async (file: File) => {
@@ -32,30 +69,11 @@ export const useAnalysisEngine = () => {
 
         setIsAnalyzing(true);
         try {
-            const buffer = await file.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
-            const wasm = await importWasm();
-
-            // 1. Run Physics Engine (Entropy, Hilbert, Autocorrelation)
-            const rawResult = wasm.analyze(bytes);
-
-            // 2. Run Logic Engine (Recursive TLV Parser)
-            // We run this separately so parser failures don't kill the whole analysis
-            let parsed_structures: TlvNode[] = [];
-            try {
-                if (wasm.parse_file_structure) {
-                    parsed_structures = wasm.parse_file_structure(bytes);
-                }
-            } catch (e) {
-                console.warn("TLV Parser warning:", e);
-                // We swallow the parser error so the user still gets the visual analysis
-            }
-
-            // 3. Merge Results
-            setResult({
-                ...rawResult,
-                parsed_structures
-            });
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const request = (useAnalysisEngine as any).__request as ((f: File) => Promise<any>) | null;
+            if (!request) throw new Error('Analysis worker not available');
+            const workerResult = await request(file);
+            setResult(workerResult as AnalysisResult);
 
         } catch (err) {
             console.error("Critical Analysis Failure:", err);

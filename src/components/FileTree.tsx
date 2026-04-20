@@ -2,16 +2,21 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Folder, ChevronDown, ChevronRight, Box, Shield, Minimize2, Maximize2 } from 'lucide-react';
 import { TlvNode } from '../types/analysis';
 import { DetectedStandard } from '../utils/standards';
+import { FileMetadata } from '../utils/export';
 
 interface Props {
-    file: File | null;
+    file: FileMetadata | null;
     fileSize?: number;
     structures?: TlvNode[];
     standard?: DetectedStandard | null;
+    trailingArtifacts?: string[];
     selectionOffset?: number | null;
+    inspectorContext?: 'file' | 'node' | 'trailing';
     onSelectRange: (start: number, end: number) => void;
     onHoverRange: (range: { start: number, end: number } | null) => void;
     onNodeSelect?: (node: TlvNode) => void;
+    onSelectFileRoot?: () => void;
+    onSelectTrailingArtifacts?: () => void;
 }
 
 const TreeNode: React.FC<{
@@ -24,7 +29,7 @@ const TreeNode: React.FC<{
     const [expanded, setExpanded] = useState(false);
     const nodeRef = useRef<HTMLDivElement>(null);
     const hasChildren = node.children && node.children.length > 0;
-    const endOffset = node.offset + node.tag_length + node.value_length;
+    const endOffset = node.offset + node.total_len;
     const containsSelection = selectionOffset !== undefined && selectionOffset !== null && selectionOffset >= node.offset && selectionOffset < endOffset;
 
     useEffect(() => { if (containsSelection && hasChildren) setExpanded(true); }, [containsSelection, hasChildren]);
@@ -60,7 +65,20 @@ const TreeNode: React.FC<{
     );
 };
 
-const FileTree: React.FC<Props> = ({ file, fileSize = 0, structures, standard, selectionOffset, onSelectRange, onHoverRange, onNodeSelect }) => {
+const FileTree: React.FC<Props> = ({
+    file,
+    fileSize = 0,
+    structures,
+    standard,
+    trailingArtifacts,
+    selectionOffset,
+    inspectorContext,
+    onSelectRange,
+    onHoverRange,
+    onNodeSelect,
+    onSelectFileRoot,
+    onSelectTrailingArtifacts
+}) => {
     const [viewMode, setViewMode] = useState<'simple' | 'detailed'>('simple');
     const [isMinimized, setIsMinimized] = useState(false);
 
@@ -76,6 +94,13 @@ const FileTree: React.FC<Props> = ({ file, fileSize = 0, structures, standard, s
         <div className="file-tree" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
             <div className="panel-header">
                 <div style={{ display: 'flex', gap: '15px' }}>
+                    <span
+                        onClick={() => onSelectFileRoot?.()}
+                        style={{ cursor: onSelectFileRoot ? 'pointer' : 'default', color: inspectorContext === 'file' ? 'var(--accent-cyan)' : '#555', marginRight: '10px' }}
+                        title="Select file root for intelligence summary"
+                    >
+                        FILE
+                    </span>
                     <span onClick={() => setViewMode('simple')} style={{ cursor: 'pointer', color: viewMode === 'simple' ? 'var(--accent-cyan)' : '#555' }}>SECTIONS</span>
                     <span onClick={() => setViewMode('detailed')} style={{ cursor: 'pointer', color: viewMode === 'detailed' ? 'var(--accent-cyan)' : '#555' }}>TREE</span>
                 </div>
@@ -113,6 +138,31 @@ const FileTree: React.FC<Props> = ({ file, fileSize = 0, structures, standard, s
                                     <div style={{ color: '#555', fontSize: '0.7rem' }}>{((sec.end - sec.start) / 1024).toFixed(1)} KB</div>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {trailingArtifacts && trailingArtifacts.length > 0 && (
+                        <div style={{ marginTop: '18px', borderTop: '1px solid #222', paddingTop: '12px' }}>
+                            <div style={{ fontSize: '0.65rem', color: '#ff2a2a', letterSpacing: '1px', marginBottom: '8px' }}>TRAILING ARTIFACTS</div>
+                            <div
+                                onClick={() => {
+                                    const footerStart = Math.max(0, fileSize - 64 * 1024);
+                                    onSelectRange(footerStart, fileSize);
+                                    onSelectTrailingArtifacts?.();
+                                }}
+                                style={{
+                                    padding: '10px 12px',
+                                    background: inspectorContext === 'trailing' ? 'rgba(255, 42, 42, 0.12)' : '#0a0a0a',
+                                    borderLeft: '2px solid #ff2a2a',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <div style={{ color: '#eee', fontSize: '0.75rem', marginBottom: '6px' }}>Detected {trailingArtifacts.length} trailing signal(s)</div>
+                                <div style={{ color: '#777', fontSize: '0.65rem', lineHeight: '1.4' }}>
+                                    {trailingArtifacts.slice(0, 4).join(' • ')}
+                                    {trailingArtifacts.length > 4 ? ' • …' : ''}
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>

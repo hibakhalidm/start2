@@ -3,7 +3,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useAnalysisEngine } from './hooks/useAnalysisEngine';
 import { HilbertCurve } from './utils/hilbert';
 import { detectStandard, DetectedStandard } from './utils/standards';
-import { generateReport } from './utils/export';
+import { FileMetadata, generateReport } from './utils/export';
 import { Download, HardDrive, Activity, MousePointer2, FileType } from 'lucide-react';
 
 import Radar from './components/Radar';
@@ -21,7 +21,9 @@ const calculateLocalAutocorrelation = (data: Uint8Array): number[] => { return [
 function App() {
     const { isReady, analyzeFile, result } = useAnalysisEngine();
     const [fileData, setFileData] = useState<Uint8Array | null>(null);
+    const [fileMeta, setFileMeta] = useState<FileMetadata | null>(null);
     const [fileObj, setFileObj] = useState<File | null>(null);
+    const [inspectorContext, setInspectorContext] = useState<'file' | 'node' | 'trailing'>('file');
     const [isDragging, setIsDragging] = useState(false);
 
     // --- VIEW OPTIONS STATE ---
@@ -44,26 +46,22 @@ function App() {
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
             const file = e.target.files[0];
-
-            // FORENSIC MEMORY FIREWALL
-            const MAX_FILE_SIZE = 256 * 1024 * 1024; // 256 MB Limit for Browser Sandbox
-            if (file.size > MAX_FILE_SIZE) {
-                alert(`FORENSIC WARNING: File size (${(file.size / 1024 / 1024).toFixed(1)}MB) exceeds safe memory boundaries for live browser analysis.`);
-                return;
-            }
-
             await processFile(file);
         }
     };
 
     const processFile = async (file: File) => {
         setFileObj(file);
+        setFileMeta({ name: file.name, size: file.size, type: file.type, lastModified: file.lastModified });
         setStandard(null);
         setSelectionRange(null);
         setSelectedNode(null);
+        setInspectorContext('file');
+        // 4GB+ bypass: only load a small preview window for UI (header), never the whole file.
+        const headerBuf = await file.slice(0, 1024 * 1024).arrayBuffer(); // 1MB preview
+        const headerBytes = new Uint8Array(headerBuf);
+        setFileData(headerBytes);
         analyzeFile(file);
-        const buffer = await file.arrayBuffer();
-        setFileData(new Uint8Array(buffer));
     };
 
     const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); };
@@ -73,14 +71,6 @@ function App() {
         setIsDragging(false);
         if (e.dataTransfer.files && e.dataTransfer.files[0]) {
             const file = e.dataTransfer.files[0];
-
-            // FORENSIC MEMORY FIREWALL
-            const MAX_FILE_SIZE = 256 * 1024 * 1024; // 256 MB Limit for Browser Sandbox
-            if (file.size > MAX_FILE_SIZE) {
-                alert(`FORENSIC WARNING: File size (${(file.size / 1024 / 1024).toFixed(1)}MB) exceeds safe memory boundaries for live browser analysis. Please carve or split the evidence file to < 256MB before ingestion to prevent memory corruption.`);
-                return;
-            }
-
             await processFile(file);
         }
     };
@@ -99,18 +89,40 @@ function App() {
         setStandard(detectStandard(result?.parsed_structures, fileData));
     }, [result, fileData]);
 
-    const selectedBytes = useMemo(() => {
-        if (!fileData || !selectionRange) return null;
-        return fileData.slice(selectionRange.start, Math.min(selectionRange.end, selectionRange.start + 65536));
-    }, [fileData, selectionRange]);
+    const [selectedBytes, setSelectedBytes] = useState<Uint8Array | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+            if (!fileObj || !selectionRange) {
+                setSelectedBytes(null);
+                return;
+            }
+            const start = Math.max(0, selectionRange.start);
+            const end = Math.min(fileObj.size, Math.max(selectionRange.end, start), start + 65536);
+            const buf = await fileObj.slice(start, end).arrayBuffer();
+            if (cancelled) return;
+            setSelectedBytes(new Uint8Array(buf));
+        };
+        void load();
+        return () => { cancelled = true; };
+    }, [fileObj, selectionRange]);
 
     const liveGraphData = useMemo(() => {
         if (selectedBytes && selectedBytes.length > 0) return calculateLocalAutocorrelation(selectedBytes);
         return result?.autocorrelation_graph || [];
     }, [selectedBytes, result]);
 
-    const currentViewPercent = fileData ? currentScrollOffset / fileData.length : 0;
-    const isAnalyzing = !result && fileObj; // Simple heuristic for now
+    const currentViewPercent = fileMeta ? currentScrollOffset / fileMeta.size : 0;
+    const isAnalyzing = !result && fileMeta; // Simple heuristic for now
+
+    const showStructureInspector =
+        showInspector &&
+        (
+            !!selectedNode ||
+            (!!result?.trailing_artifacts &&
+                result.trailing_artifacts.length > 0 &&
+                (inspectorContext === 'file' || inspectorContext === 'trailing'))
+        );
 
     return (
         <div
@@ -139,7 +151,7 @@ function App() {
                     </div>
 
                     <button
-                        onClick={() => fileObj && result && generateReport(fileObj, result, standard)}
+                        onClick={() => fileMeta && fileData && result && generateReport(fileMeta, fileData, result, standard)}
                         disabled={!result}
                         style={{
                             background: result ? 'rgba(0, 240, 255, 0.1)' : '#222',
@@ -155,7 +167,7 @@ function App() {
             </div>
 
             <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-                {!fileData ? (
+                {!fileObj ? (
                     // 1. PREMIUM EMPTY STATE
                     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#444' }}>
                         <div style={{ width: '100px', height: '100px', border: '2px dashed #333', borderRadius: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '20px', animation: 'pulse-border 2s infinite' }}>
@@ -169,14 +181,18 @@ function App() {
                         {/* LEFT: TREE */}
                         <Panel defaultSize={20} minSize={10} className="bg-panel cyber-border-right">
                             <FileTree
-                                file={fileObj}
-                                fileSize={fileData?.length}
+                                file={fileMeta}
+                                fileSize={fileMeta?.size}
                                 structures={result?.parsed_structures}
                                 standard={standard}
+                                trailingArtifacts={result?.trailing_artifacts}
                                 selectionOffset={selectionRange?.start ?? null}
+                                inspectorContext={inspectorContext}
                                 onSelectRange={(s, e) => handleJumpTo(s, e - s)}
                                 onHoverRange={setHoverRange}
-                                onNodeSelect={(node) => setSelectedNode(node)}
+                                onNodeSelect={(node) => { setSelectedNode(node); setInspectorContext('node'); }}
+                                onSelectFileRoot={() => { setSelectedNode(null); setInspectorContext('file'); }}
+                                onSelectTrailingArtifacts={() => { setSelectedNode(null); setInspectorContext('trailing'); }}
                             />
                         </Panel>
                         <PanelResizeHandle className="resize-handle" />
@@ -215,10 +231,11 @@ function App() {
                                         <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                                             <div className="panel-header">RAW MATRIX</div>
                                             <div style={{ flex: 1 }}>
-                                                {fileData && (
+                                                {fileObj && fileMeta && (
                                                     <HexView
                                                         ref={hexViewRef}
-                                                        data={fileData}
+                                                        file={fileObj}
+                                                        fileSize={fileMeta.size}
                                                         stride={hexStride}
                                                         selectionRange={selectionRange}
                                                         hoverRange={hoverRange}
@@ -234,7 +251,7 @@ function App() {
                                                     <SemanticScrollbar
                                                         entropyMap={result.entropy_map}
                                                         currentPercent={currentViewPercent}
-                                                        onScroll={(p) => handleJumpTo(Math.floor(fileData!.length * p))}
+                                                        onScroll={(p) => fileMeta && handleJumpTo(Math.floor(fileMeta.size * p))}
                                                     />
                                                 )}
                                             </div>
@@ -253,9 +270,16 @@ function App() {
                                     <div style={{ padding: '15px', display: 'flex', flexDirection: 'column', height: 'calc(100% - 30px)', gap: '15px', overflowY: 'auto' }}>
 
                                         {/* INSPECTOR VIEW */}
-                                        {showInspector && selectedNode && (
+                                        {showStructureInspector && (
                                             <div style={{ flexShrink: 0 }}>
-                                                <StructureInspector node={selectedNode} fileData={fileData} onFocus={(s, e) => handleJumpTo(s, e - s)} />
+                                                <StructureInspector
+                                                    node={selectedNode}
+                                                    fileData={fileData}
+                                                    fileMeta={fileMeta}
+                                                    inspectorContext={inspectorContext}
+                                                    trailingArtifacts={result?.trailing_artifacts}
+                                                    onFocus={(s, e) => handleJumpTo(s, e - s)}
+                                                />
                                             </div>
                                         )}
 
@@ -282,7 +306,7 @@ function App() {
             }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <HardDrive size={12} color="var(--accent-blue)" />
-                    <span>SIZE: {fileObj ? (fileObj.size / 1024).toFixed(2) + ' KB' : 'N/A'}</span>
+                    <span>SIZE: {fileMeta ? (fileMeta.size / 1024).toFixed(2) + ' KB' : 'N/A'}</span>
                 </div>
                 <div style={{ width: '1px', height: '12px', background: '#333' }} />
 

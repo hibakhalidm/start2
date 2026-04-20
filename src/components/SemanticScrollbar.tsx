@@ -20,11 +20,11 @@ const SemanticScrollbar: React.FC<Props> = ({ entropyMap, onScroll, currentPerce
     return (
         <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', background: '#050505', cursor: 'crosshair', borderLeft: '1px solid #333' }} onMouseDown={handleMouseDown}>
             {entropyMap.map((val, i) => {
-                // val 0.0 (Low Entropy) -> Deep Blue
-                // val 1.0 (High Entropy) -> Bright White/Cyan
-                const r = Math.floor(val * 200);
-                const g = Math.floor(val * 255);
-                const b = Math.floor(150 + val * 105);
+                // Shannon entropy for bytes is in [0, 8]. Normalize to [0, 1] for consistent rendering.
+                const n = Math.max(0, Math.min(1, val / 8));
+                const r = Math.floor(n * 200);
+                const g = Math.floor(n * 255);
+                const b = Math.floor(150 + n * 105);
                 return (
                     <div
                         key={i}
@@ -34,7 +34,7 @@ const SemanticScrollbar: React.FC<Props> = ({ entropyMap, onScroll, currentPerce
                             left: 0, right: 0,
                             height: `${100 / entropyMap.length}%`,
                             background: `rgb(${r}, ${g}, ${b})`,
-                            boxShadow: val > 0.8 ? `0 0 5px rgba(0, 240, 255, ${val})` : 'none'
+                            boxShadow: n > 0.8 ? `0 0 5px rgba(0, 240, 255, ${n})` : 'none'
                         }}
                     />
                 );

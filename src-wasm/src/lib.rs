@@ -245,9 +245,16 @@ fn detect_autocorrelation(data: &[u8]) -> bool {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TlvNode {
     pub name: String,
+    pub tag: u8,
     pub offset: usize,
-    pub tag_length: usize,
-    pub value_length: usize,
+    /// Total header length in bytes (tag bytes + length bytes).
+    pub header_len: usize,
+    /// Value length in bytes (decoded from TLV length field).
+    pub value_len: usize,
+    /// Absolute offset where the value begins (offset + header_len).
+    pub value_offset: usize,
+    /// Total length in bytes (header_len + value_len).
+    pub total_len: usize,
     pub is_container: bool,
     pub children: Vec<TlvNode>,
 }
@@ -259,7 +266,7 @@ pub fn parse_file_structure(data: &[u8]) -> Result<JsValue, JsValue> {
 
     while cursor < data.len() {
         if let Some(node) = parse_tlv_node(data, cursor, 0) {
-            cursor = node.offset + node.tag_length + node.value_length;
+            cursor = node.offset + node.total_len;
             nodes.push(node);
         } else {
             cursor += 1;
@@ -275,43 +282,48 @@ fn parse_tlv_node(data: &[u8], offset: usize, depth: usize) -> Option<TlvNode> {
 
     let tag = data[offset];
     let is_container = (tag & 0x20) == 0x20;
-    let mut current_offset = offset + 1;
-
-    if current_offset >= data.len() {
+    // NOTE: This parser currently supports single-octet tag identifiers.
+    // Multi-byte tags and indefinite-length encoding are treated as "no parse".
+    let tag_byte_len = 1;
+    let length_start = offset + tag_byte_len;
+    if length_start >= data.len() {
         return None;
     }
 
-    let length_byte = data[current_offset];
-    let mut value_length = 0;
-    let mut tag_len = 2;
-
-    if length_byte & 0x80 == 0 {
-        value_length = length_byte as usize;
+    let length_byte = data[length_start];
+    let (length_byte_len, value_len) = if length_byte & 0x80 == 0 {
+        (1usize, length_byte as usize)
     } else {
         let num_length_bytes = (length_byte & 0x7F) as usize;
-        if num_length_bytes > 4 || current_offset + num_length_bytes >= data.len() {
+        // For safety and UX, cap to 4 bytes (up to 4GB value lengths).
+        if num_length_bytes == 0 || num_length_bytes > 4 {
             return None;
         }
-
-        for i in 0..num_length_bytes {
-            value_length = (value_length << 8) | (data[current_offset + 1 + i] as usize);
+        if length_start + 1 + num_length_bytes > data.len() {
+            return None;
         }
-        tag_len += num_length_bytes;
-    }
+        let mut v = 0usize;
+        for i in 0..num_length_bytes {
+            v = (v << 8) | (data[length_start + 1 + i] as usize);
+        }
+        (1usize + num_length_bytes, v)
+    };
 
-    current_offset += tag_len - 1;
-    if current_offset + value_length > data.len() {
+    let header_len = tag_byte_len + length_byte_len;
+    let value_offset = offset + header_len;
+    let total_len = header_len + value_len;
+    if value_offset > data.len() || value_offset + value_len > data.len() {
         return None;
     }
 
     let mut children = Vec::new();
-    if is_container && value_length > 0 {
-        let mut child_cursor = current_offset;
-        let end_limit = current_offset + value_length;
+    if is_container && value_len > 0 {
+        let mut child_cursor = value_offset;
+        let end_limit = value_offset + value_len;
 
         while child_cursor < end_limit {
             if let Some(child) = parse_tlv_node(data, child_cursor, depth + 1) {
-                child_cursor = child.offset + child.tag_length + child.value_length;
+                child_cursor = child.offset + child.total_len;
                 children.push(child);
             } else {
                 break;
@@ -331,10 +343,83 @@ fn parse_tlv_node(data: &[u8], offset: usize, depth: usize) -> Option<TlvNode> {
 
     Some(TlvNode {
         name,
+        tag,
         offset,
-        tag_length: tag_len,
-        value_length,
+        header_len,
+        value_len,
+        value_offset,
+        total_len,
         is_container,
         children,
     })
+}
+
+/// Golden-master regression tests for Phase 1 `TlvNode` contract (offsets, lengths, tag).
+#[cfg(test)]
+mod tlv_golden_tests {
+    use super::parse_tlv_node;
+
+    /// Primitive OCTET STRING: tag 0x04, definite short length 2, value `41 42`.
+    /// Layout: [tag][len][v0][v1] => header_len=2, value_offset=2, value_len=2, total_len=4.
+    #[test]
+    fn golden_octet_string_primitive_contract() {
+        let data: [u8; 4] = [0x04, 0x02, 0x41, 0x42];
+        let n = parse_tlv_node(&data, 0, 0).expect("must parse primitive OCTET STRING");
+
+        assert_eq!(n.tag, 0x04, "tag byte");
+        assert_eq!(n.offset, 0);
+        assert_eq!(n.header_len, 2, "1 tag + 1 length octet");
+        assert_eq!(n.value_len, 2);
+        assert_eq!(n.value_offset, 2, "offset + header_len");
+        assert_eq!(n.total_len, 4, "header_len + value_len");
+        assert!(!n.is_container, "primitive tag");
+        assert!(n.children.is_empty());
+    }
+
+    /// Constructed CONTEXT [1]: tag 0xA1 (constructed bit set), short length 6, two child TLVs inside.
+    #[test]
+    fn golden_constructed_sequence_contract() {
+        // 0xA1 0x06 | 0x02 0x01 0x2A | 0x04 0x01 0xFF
+        let data: [u8; 8] = [0xA1, 0x06, 0x02, 0x01, 0x2A, 0x04, 0x01, 0xFF];
+        let root = parse_tlv_node(&data, 0, 0).expect("must parse constructed node");
+
+        assert_eq!(root.tag, 0xA1);
+        assert_eq!(root.offset, 0);
+        assert_eq!(root.header_len, 2);
+        assert_eq!(root.value_offset, 2);
+        assert_eq!(root.value_len, 6);
+        assert_eq!(root.total_len, 8);
+        assert!(root.is_container);
+        assert_eq!(root.children.len(), 2);
+
+        let c0 = &root.children[0];
+        assert_eq!(c0.tag, 0x02);
+        assert_eq!(c0.offset, 2);
+        assert_eq!(c0.header_len, 2);
+        assert_eq!(c0.value_offset, 4);
+        assert_eq!(c0.value_len, 1);
+        assert_eq!(c0.total_len, 3);
+
+        let c1 = &root.children[1];
+        assert_eq!(c1.tag, 0x04);
+        assert_eq!(c1.offset, 5);
+        assert_eq!(c1.header_len, 2);
+        assert_eq!(c1.value_offset, 7);
+        assert_eq!(c1.value_len, 1);
+        assert_eq!(c1.total_len, 3);
+    }
+
+    /// Definite long form length: 0x81 + 1 length octet (value length = 1).
+    #[test]
+    fn golden_long_form_length_contract() {
+        let data: [u8; 4] = [0x04, 0x81, 0x01, 0x7F];
+        let n = parse_tlv_node(&data, 0, 0).expect("must parse long-form length");
+
+        assert_eq!(n.tag, 0x04);
+        assert_eq!(n.header_len, 3, "1 tag + 0x81 + 1 length octet");
+        assert_eq!(n.value_len, 1);
+        assert_eq!(n.value_offset, 3);
+        assert_eq!(n.total_len, 4);
+        assert_eq!(data[n.value_offset], 0x7F);
+    }
 }

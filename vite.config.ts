@@ -14,6 +14,18 @@ export default defineConfig({
             '@': '/src',
         },
     },
+    // Web Workers require code-splitting, which is incompatible with IIFE/UMD output.
+    // Force an ES module build output so worker bundles are supported.
+    build: {
+        rollupOptions: {
+            output: {
+                format: 'es'
+            }
+        }
+    },
+    worker: {
+        format: 'es'
+    },
     server: {
         port: 5173,
         strictPort: true,

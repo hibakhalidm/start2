@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CIFAD — Integrity seal verification</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --pass-bg: #0d2818;
+      --pass-border: #238636;
+      --pass-text: #3fb950;
+      --fail-bg: #2d1518;
+      --fail-border: #da3633;
+      --fail-text: #ff7b72;
+      --warn-bg: #2d2419;
+      --warn-border: #d29922;
+      --warn-text: #e3b341;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.5;
+      padding: 1.5rem clamp(1rem, 4vw, 2.5rem);
+    }
+    header { max-width: 56rem; margin: 0 auto 1.25rem; }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.35rem; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); font-size: 0.875rem; max-width: 48rem; }
+    main { max-width: 56rem; margin: 0 auto; display: grid; gap: 1rem; }
+    label { display: block; font-size: 0.8rem; font-weight: 600; color: var(--muted); margin-bottom: 0.35rem; }
+    textarea {
+      width: 100%;
+      min-height: 14rem;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      resize: vertical;
+    }
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+    button {
+      font: inherit;
+      font-weight: 600;
+      padding: 0.55rem 1.1rem;
+      border-radius: 8px;
+      border: 1px solid var(--accent);
+      background: #1f6feb;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .result {
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      border: 2px solid var(--border);
+      background: var(--surface);
+      min-height: 4.5rem;
+      display: none;
+    }
+    .result.visible { display: block; }
+    .result.pass { border-color: var(--pass-border); background: var(--pass-bg); }
+    .result.fail { border-color: var(--fail-border); background: var(--fail-bg); }
+    .result.warn { border-color: var(--warn-border); background: var(--warn-bg); }
+    .badge {
+      font-size: 1.75rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      margin: 0 0 0.5rem;
+    }
+    .result.pass .badge { color: var(--pass-text); }
+    .result.fail .badge { color: var(--fail-text); }
+    .result.warn .badge { color: var(--warn-text); }
+    .detail { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); word-break: break-all; margin-top: 0.5rem; }
+    .detail strong { color: var(--text); }
+    footer { max-width: 56rem; margin: 1.5rem auto 0; font-size: 0.75rem; color: var(--muted); }
+    code { font-family: var(--mono); font-size: 0.85em; background: var(--surface); padding: 0.1em 0.35em; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CIFAD report — integrity seal verification</h1>
+    <p class="sub">
+      Standalone auditor tool (no build, no npm). Paste the full exported JSON. The tool parses JSON,
+      removes <code>integrity_seal</code> and <code>verification_metadata</code>, then hashes
+      <code>UTF-8(JSON.stringify(payload))</code> with compact serialization — matching CIFAD export semantics.
+      <code>crypto.subtle</code> requires a <strong>secure context</strong> (HTTPS or <code>http://localhost</code>); opening this file as <code>file://</code> may be blocked by the browser.
+    </p>
+  </header>
+  <main>
+    <div>
+      <label for="json-input">Pasted report JSON</label>
+      <textarea id="json-input" spellcheck="false" placeholder='{ "timestamp": "...", ... }'></textarea>
+    </div>
+    <div class="row">
+      <button type="button" id="verify-btn">Verify integrity seal</button>
+    </div>
+    <div id="result" class="result" role="status" aria-live="polite"></div>
+  </main>
+  <footer>
+    Phase 10 — chain-of-custody reproduction only. Does not validate schema beyond JSON parse and seal fields.
+  </footer>
+  <script>
+    (function () {
+      const input = document.getElementById('json-input');
+      const btn = document.getElementById('verify-btn');
+      const resultEl = document.getElementById('result');
+
+      function show(kind, title, lines) {
+        resultEl.className = 'result visible ' + kind;
+        resultEl.innerHTML =
+          '<p class="badge">' + title + '</p>' +
+          (lines && lines.length
+            ? '<div class="detail">' + lines.map(function (l) { return '<div>' + l + '</div>'; }).join('') + '</div>'
+            : '');
+      }
+
+      function hexFromBuffer(buf) {
+        var bytes = new Uint8Array(buf);
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) {
+          hex += bytes[i].toString(16).padStart(2, '0');
+        }
+        return hex;
+      }
+
+      function normalizeSeal(s) {
+        if (typeof s !== 'string') return null;
+        var t = s.trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(t)) return null;
+        return t;
+      }
+
+      btn.addEventListener('click', async function () {
+        resultEl.classList.remove('visible', 'pass', 'fail', 'warn');
+        resultEl.innerHTML = '';
+
+        if (!window.crypto || !window.crypto.subtle) {
+          show('warn', 'UNAVAILABLE', [
+            '<strong>Web Crypto</strong> is not available (often blocked on <code>file://</code>). Serve this HTML over HTTPS or open from localhost.'
+          ]);
+          return;
+        }
+
+        var raw = input.value;
+        if (!raw.trim()) {
+          show('fail', 'FAIL', ['No JSON pasted.']);
+          return;
+        }
+
+        var root;
+        try {
+          root = JSON.parse(raw);
+        } catch (e) {
+          show('fail', 'FAIL', ['JSON parse error: <strong>' + String(e.message || e) + '</strong>']);
+          return;
+        }
+
+        if (root === null || typeof root !== 'object' || Array.isArray(root)) {
+          show('fail', 'FAIL', ['Root JSON value must be a plain object.']);
+          return;
+        }
+
+        var sealRaw = root.integrity_seal;
+        var normalizedSeal = normalizeSeal(sealRaw);
+        if (!normalizedSeal) {
+          show('fail', 'FAIL', [
+            'Missing or invalid <code>integrity_seal</code> (expected 64 lowercase hex characters).'
+          ]);
+          return;
+        }
+
+        var clone = Object.assign({}, root);
+        delete clone.integrity_seal;
+        delete clone.verification_metadata;
+
+        var canonical = JSON.stringify(clone);
+        var utf8 = new TextEncoder().encode(canonical);
+        var digestBuf;
+        try {
+          digestBuf = await crypto.subtle.digest('SHA-256', utf8);
+        } catch (e) {
+          show('fail', 'FAIL', ['Hash error: <strong>' + String(e.message || e) + '</strong>']);
+          return;
+        }
+
+        var computed = hexFromBuffer(digestBuf);
+        var ok = computed === normalizedSeal;
+
+        if (ok) {
+          show('pass', 'PASS', [
+            'Computed SHA-256 matches <code>integrity_seal</code>.',
+            '<strong>Canonical bytes length (UTF-8):</strong> ' + utf8.length
+          ]);
+        } else {
+          show('fail', 'FAIL', [
+            '<strong>Expected (seal):</strong> ' + normalizedSeal,
+            '<strong>Computed:</strong> ' + computed,
+            '<strong>Canonical JSON length (chars):</strong> ' + canonical.length
+          ]);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

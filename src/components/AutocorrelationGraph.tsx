@@ -12,18 +12,20 @@ const AutocorrelationGraph: React.FC<Props> = ({ fileData, onLagSelect }) => {
     // Calculate a "Global Signal Profile" instead of local autocorrelation
     // This represents the byte density/variance across the whole file
     const graphData = useMemo(() => {
-        if (!fileData) return [];
+        if (!fileData || fileData.length === 0) return [];
         const width = 200; // Number of bars
-        const chunkSize = Math.floor(fileData.length / width);
+        const chunkSize = Math.max(1, Math.floor(fileData.length / width)); // floor-guard: prevents div-by-zero on small files
         const data = [];
 
         for (let i = 0; i < width; i++) {
             const start = i * chunkSize;
-            const end = start + chunkSize;
+            if (start >= fileData.length) break;
+            const end = Math.min(start + chunkSize, fileData.length);
             // Calculate simple variance/activity for this chunk
             let sum = 0;
             for (let j = start; j < end; j++) sum += fileData[j];
-            const avg = sum / chunkSize;
+            const denom = Math.max(1, end - start);
+            const avg = sum / denom;
             data.push(avg);
         }
         return data;

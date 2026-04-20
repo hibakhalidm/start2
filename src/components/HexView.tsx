@@ -1,8 +1,10 @@
 import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import { FixedSizeList as List } from 'react-window';
+import { useHexPaginator } from '../hooks/useHexPaginator';
 
 interface HexViewProps {
-    data: Uint8Array;
+    file: File;
+    fileSize: number;
     stride?: number;
     onScroll: (offset: number) => void;
     onSelect: (start: number, end: number) => void;
@@ -13,12 +15,24 @@ interface HexViewProps {
 export interface HexViewRef { scrollToOffset: (offset: number) => void; }
 
 const HexView = forwardRef<HexViewRef, HexViewProps>(({
-    data, stride = 16, onScroll, onSelect, selectionRange, hoverRange
+    file, fileSize, stride = 16, onScroll, onSelect, selectionRange, hoverRange
 }, ref) => {
     const listRef = useRef<List>(null);
-    const rowCount = Math.ceil(data.length / stride);
+    const rowCount = Math.ceil(fileSize / stride);
     const [isDragging, setIsDragging] = useState(false);
     const [dragStart, setDragStart] = useState<number | null>(null);
+    const [cacheEpoch, setCacheEpoch] = useState(0);
+    const paginator = useHexPaginator(file, fileSize);
+    const epochBumpScheduledRef = useRef(false);
+
+    const bumpEpochOnce = () => {
+        if (epochBumpScheduledRef.current) return;
+        epochBumpScheduledRef.current = true;
+        queueMicrotask(() => {
+            epochBumpScheduledRef.current = false;
+            setCacheEpoch((e) => e + 1);
+        });
+    };
 
     useImperativeHandle(ref, () => ({
         scrollToOffset: (offset: number) => {
@@ -31,15 +45,25 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
     const handleByteEnter = (index: number) => { if (isDragging && dragStart !== null) onSelect(Math.min(dragStart, index), Math.max(dragStart, index)); };
     const handleMouseUp = () => { setIsDragging(false); setDragStart(null); };
 
-    const Row = ({ index, style }: any) => {
+    const Row = ({ index, style, data }: any) => {
         const offset = index * stride;
-        if (offset >= data.length) return null;
+        if (offset >= fileSize) return null;
+
+        // `data` carries cacheEpoch so react-window re-renders rows when chunk bytes arrive.
+        void data;
+
+        const { bytes, base, miss } = paginator.getChunkBytes(offset);
+        if (miss) {
+            paginator.ensureLoaded(offset, bumpEpochOnce);
+        }
 
         const rowData = [];
         for (let i = 0; i < stride; i++) {
             const byteIndex = offset + i;
-            if (byteIndex >= data.length) break;
-            rowData.push({ val: data[byteIndex], idx: byteIndex });
+            if (byteIndex >= fileSize) break;
+            const rel = byteIndex - base;
+            const val = rel >= 0 && rel < bytes.length ? bytes[rel] : null;
+            rowData.push({ val, idx: byteIndex });
         }
 
         return (
@@ -61,7 +85,7 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
                                     cursor: 'pointer', padding: '0 1px', borderRadius: '2px'
                                 }}
                             >
-                                {val.toString(16).padStart(2, '0').toUpperCase()}
+                                {val === null ? '--' : val.toString(16).padStart(2, '0').toUpperCase()}
                             </span>
                         );
                     })}
@@ -72,7 +96,43 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
 
     return (
         <div onMouseLeave={handleMouseUp} style={{ height: '100%', width: '100%' }}>
-            <List ref={listRef} height={600} itemCount={rowCount} itemSize={24} width="100%" onItemsRendered={({ visibleStartIndex }: { visibleStartIndex: number }) => onScroll(visibleStartIndex * stride)}>
+            <List
+                ref={listRef}
+                height={600}
+                itemCount={rowCount}
+                itemSize={24}
+                width="100%"
+                itemData={cacheEpoch}
+                onItemsRendered={({ visibleStartIndex, visibleStopIndex }: { visibleStartIndex: number; visibleStopIndex: number }) => {
+                    const absOffset = visibleStartIndex * stride;
+                    onScroll(absOffset);
+                    let anyMiss = false;
+                    const head = paginator.getChunkBytes(absOffset);
+                    if (head.miss) anyMiss = true;
+
+                    // Warm all chunks intersecting the visible window (bounded by react-window virtualization).
+                    for (let r = visibleStartIndex; r <= visibleStopIndex; r++) {
+                        const off = r * stride;
+                        if (off >= fileSize) break;
+                        const row = paginator.getChunkBytes(off);
+                        if (row.miss) anyMiss = true;
+                    }
+                    if (anyMiss) {
+                        // Async loads; coalesce epoch bumps to avoid render storms.
+                        paginator.ensureLoaded(absOffset, bumpEpochOnce);
+                        for (let r = visibleStartIndex; r <= visibleStopIndex; r++) {
+                            const off = r * stride;
+                            if (off >= fileSize) break;
+                            paginator.ensureLoaded(off, bumpEpochOnce);
+                        }
+                    }
+
+                    // Light prefetch of the trailing edge to reduce flicker on fast scroll.
+                    const trailingOffset = visibleStopIndex * stride;
+                    paginator.prefetch(trailingOffset);
+                    paginator.prefetch(trailingOffset + paginator.CHUNK_SIZE);
+                }}
+            >
                 {Row}
             </List>
         </div>

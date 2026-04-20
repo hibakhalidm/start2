@@ -9,10 +9,28 @@ export interface DetectedStandard {
 }
 
 export const detectStandard = (nodes: TlvNode[] | undefined, rawBytes: Uint8Array | null): DetectedStandard | null => {
+    // Prefer inspecting the root TLV value region when available.
+    // This avoids false positives from unrelated bytes in the surrounding evidence.
+    let candidateStart = 0;
+    let candidateEnd = rawBytes?.length ?? 0;
+    if (rawBytes && nodes && nodes.length > 0) {
+        const root = nodes[0];
+        const end = root.offset + root.total_len;
+        if (end <= rawBytes.length && root.value_offset + root.value_len <= rawBytes.length) {
+            candidateStart = root.value_offset;
+            candidateEnd = root.value_offset + root.value_len;
+        }
+    }
+
+    const sliceAvailable = candidateEnd - candidateStart;
 
     // 1. MAGIC NUMBER DETECTION (Raw Headers)
-    if (rawBytes && rawBytes.length >= 4) {
-        const magic32 = (rawBytes[0] << 24) | (rawBytes[1] << 16) | (rawBytes[2] << 8) | rawBytes[3];
+    if (rawBytes && sliceAvailable >= 4) {
+        const magic32 =
+            (rawBytes[candidateStart] << 24) |
+            (rawBytes[candidateStart + 1] << 16) |
+            (rawBytes[candidateStart + 2] << 8) |
+            rawBytes[candidateStart + 3];
 
         // PCAP (.pcap) Magic Numbers (Endianness variants)
         if (magic32 === 0xa1b2c3d4 || magic32 === 0xd4c3b2a1) {
@@ -23,7 +41,7 @@ export const detectStandard = (nodes: TlvNode[] | undefined, rawBytes: Uint8Arra
             return { name: "PCAP-NG", description: "Next Generation Packet Capture", category: "NETWORK", confidence: "HIGH", color: "#ff00aa" };
         }
         // .CR (Custom Radio / Crash Record) - Typical Ascii "CR" header
-        if (rawBytes[0] === 0x43 && rawBytes[1] === 0x52) {
+        if (rawBytes[candidateStart] === 0x43 && rawBytes[candidateStart + 1] === 0x52) {
             return { name: ".CR RADIO/CRASH", description: "Custom Radio/Crash Protocol", category: "TELECOM", confidence: "MEDIUM", color: "#eebb00" };
         }
     }
@@ -42,7 +60,7 @@ export const detectStandard = (nodes: TlvNode[] | undefined, rawBytes: Uint8Arra
     }
 
     // 3. ENCRYPTION / COMPRESSION HEURISTIC (If no structure found, check entropy proxy via bytes)
-    if (rawBytes && rawBytes.length > 512) {
+    if (rawBytes && sliceAvailable > 512) {
         // Simple heuristic: If first 512 bytes are highly irregular, likely compressed/encrypted
         return { name: "ENCRYPTED / COMPRESSED", description: "High entropy payload detected. No readable header.", category: "UNKNOWN", confidence: "LOW", color: "#ffaa00" };
     }

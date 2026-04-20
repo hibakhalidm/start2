@@ -1,35 +1,44 @@
 import { AnalysisResult } from '../types/analysis';
 import { DetectedStandard } from './standards';
+import { buildVerificationMetadata } from './reportBuilder';
 
-export const calculateFileHash = async (buffer: ArrayBuffer): Promise<string> => {
-    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+export interface FileMetadata {
+    name: string;
+    size: number;
+    type?: string;
+    lastModified?: number;
+}
+
+// TS libdefs model SubtleCrypto.digest input as BufferSource (ArrayBuffer | ArrayBufferView<ArrayBuffer>).
+// In practice, browsers accept ArrayBufferLike-backed views as well; evidence bytes here originate from File.arrayBuffer().
+export const calculateFileHash = async (buffer: ArrayBufferLike | ArrayBufferView): Promise<string> => {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer as any);
     return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
-export const generateReport = async (file: File, analysis: AnalysisResult | null, standard: DetectedStandard | null) => {
-    if (!file) return;
-
-    const arrayBuffer = await file.arrayBuffer();
-    const fileData = new Uint8Array(arrayBuffer);
+export const generateReport = async (file: FileMetadata | null, fileData: Uint8Array | null, analysis: AnalysisResult | null, standard: DetectedStandard | null) => {
+    if (!file || !fileData) return;
 
     // 1. Hash the original evidence
-    const fileHash = await calculateFileHash(fileData.buffer);
+    const fileHash = await calculateFileHash(fileData);
 
     const reportPayload = {
         timestamp: new Date().toISOString(),
-        file_metadata: { name: file.name, size: file.size, sha256_hash: fileHash },
+        file_metadata: { ...file, sha256_hash: fileHash },
         intelligence: { detected_standard: standard },
         parsed_content: analysis?.parsed_structures || "No structures detected"
     };
 
     // 2. Hash the report itself to create an Integrity Seal
-    const reportString = JSON.stringify(reportPayload);
+    // Canonical seal input: compact JSON (UTF-8) of the payload object *before* seal/metadata fields are appended.
+    const canonicalReportJson = JSON.stringify(reportPayload);
     const encoder = new TextEncoder();
-    const sealHash = await calculateFileHash(encoder.encode(reportString).buffer);
+    const sealHash = await calculateFileHash(encoder.encode(canonicalReportJson));
 
     const finalReport = {
         ...reportPayload,
-        integrity_seal: sealHash // <--- Anti-Tamper Verification
+        integrity_seal: sealHash, // <--- Anti-Tamper Verification
+        verification_metadata: buildVerificationMetadata()
     };
 
     // 3. Export
