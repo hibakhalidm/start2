@@ -19,7 +19,7 @@ import './App.css';
 const calculateLocalAutocorrelation = (data: Uint8Array): number[] => { return []; };
 
 function App() {
-    const { isReady, analyzeFile, result } = useAnalysisEngine();
+    const { isReady, analyzeFile, result, isAnalyzing } = useAnalysisEngine();
     const [fileData, setFileData] = useState<Uint8Array | null>(null);
     const [fileMeta, setFileMeta] = useState<FileMetadata | null>(null);
     const [fileObj, setFileObj] = useState<File | null>(null);
@@ -113,12 +113,14 @@ function App() {
     }, [selectedBytes, result]);
 
     const currentViewPercent = fileMeta ? currentScrollOffset / fileMeta.size : 0;
-    const isAnalyzing = !result && fileMeta; // Simple heuristic for now
+    const showCrunchingOverlay = !!fileObj && isAnalyzing;
 
     const showStructureInspector =
         showInspector &&
         (
             !!selectedNode ||
+            !!result?.crypto_mode ||
+            !!result?.protocol_guess ||
             (!!result?.trailing_artifacts &&
                 result.trailing_artifacts.length > 0 &&
                 (inspectorContext === 'file' || inspectorContext === 'trailing'))
@@ -161,12 +163,22 @@ function App() {
                             display: 'flex', alignItems: 'center', gap: '6px'
                         }}
                     >
-                        <Download size={14} /> EXPORT
+                        <Download size={14} /> GEN INTEL REPORT
                     </button>
                 </div>
             </div>
 
             <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+                {showCrunchingOverlay && (
+                    <div className="crunching-matrix-overlay" aria-live="polite" aria-busy="true">
+                        <div className="crunching-matrix-backdrop" />
+                        <div className="crunching-matrix-card">
+                            <div className="crunching-matrix-spinner" aria-hidden="true" />
+                            <div className="crunching-matrix-title">Crunching Matrix…</div>
+                            <div className="crunching-matrix-sub">Worker thread — UI stays responsive</div>
+                        </div>
+                    </div>
+                )}
                 {!fileObj ? (
                     // 1. PREMIUM EMPTY STATE
                     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#444' }}>
@@ -212,7 +224,10 @@ function App() {
                                                         highlightOffset={hoveredOffset}
                                                         selectionRange={selectionRange}
                                                         hilbert={hilbert}
-                                                        onJump={(off) => handleJumpTo(off)}
+                                                        fileSize={fileMeta.size}
+                                                        cryptoMode={result.crypto_mode ?? null}
+                                                        highEntropyRadarIndices={result.high_entropy_radar_indices ?? []}
+                                                        onJumpToOffset={(off) => handleJumpTo(off)}
                                                     />
                                                 ) : <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#555' }}>AWAITING ANALYSIS...</div>}
                                             </div>
@@ -222,7 +237,12 @@ function App() {
                                 )}
 
                                 <Panel defaultSize={15} minSize={10} collapsible={true}>
-                                    <AutocorrelationGraph fileData={fileData} onLagSelect={(off) => handleJumpTo(off)} />
+                                    <AutocorrelationGraph
+                                        fileData={fileData}
+                                        fileSize={fileMeta.size}
+                                        autocorrelationGraph={result.autocorrelation_graph ?? []}
+                                        onJumpToOffset={(off) => handleJumpTo(off)}
+                                    />
                                 </Panel>
                                 <PanelResizeHandle className="resize-handle-horizontal" />
 
@@ -278,6 +298,8 @@ function App() {
                                                     fileMeta={fileMeta}
                                                     inspectorContext={inspectorContext}
                                                     trailingArtifacts={result?.trailing_artifacts}
+                                                    cryptoMode={result?.crypto_mode ?? null}
+                                                    protocolGuess={result?.protocol_guess ?? null}
                                                     onFocus={(s, e) => handleJumpTo(s, e - s)}
                                                 />
                                             </div>
@@ -324,8 +346,8 @@ function App() {
                 </div>
 
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Activity size={12} color={isAnalyzing ? '#ffff00' : '#00ff9d'} />
-                    <span>{isAnalyzing ? 'PROCESSING...' : 'READY'}</span>
+                    <Activity size={12} color={showCrunchingOverlay ? '#ffff00' : '#00ff9d'} />
+                    <span>{showCrunchingOverlay ? 'CRUNCHING MATRIX…' : 'READY'}</span>
                 </div>
             </div>
         </div>

@@ -1,25 +1,43 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
-import { BitmapLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { BitmapLayer, ScatterplotLayer, PolygonLayer } from '@deck.gl/layers';
 import { HilbertCurve } from '../utils/hilbert';
+import { jumpOffsetFromIndex, radarCurveIndexFromFileOffset } from '../utils/spatialCorrelation';
+import type { CryptoMode } from '../types/analysis';
 import { Box, Activity, ZoomIn, ZoomOut, Maximize } from 'lucide-react';
+
+const HILBERT_DIM = 512;
+const HILBERT_TOTAL_POINTS = HILBERT_DIM * HILBERT_DIM;
 
 interface RadarProps {
     matrix: Uint8Array;
-    entropyMap?: number[]; // <-- Added for Linear view
+    entropyMap?: number[];
     highlightOffset: number | null;
     selectionRange: { start: number, end: number } | null;
     hilbert: HilbertCurve;
-    onJump: (offset: number) => void;
+    fileSize: number;
+    cryptoMode?: CryptoMode | null;
+    highEntropyRadarIndices?: number[];
+    onJumpToOffset: (absoluteOffset: number) => void;
 }
 
-const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset, selectionRange, hilbert, onJump }) => {
+const Radar: React.FC<RadarProps> = ({
+    matrix,
+    entropyMap = [],
+    highlightOffset,
+    selectionRange,
+    hilbert,
+    fileSize,
+    cryptoMode = null,
+    highEntropyRadarIndices = [],
+    onJumpToOffset,
+}) => {
     const [viewMode, setViewMode] = useState<'HILBERT' | 'LINEAR'>('HILBERT');
     const [zoom, setZoom] = useState(0);
 
     // Deck.gl BitmapLayer expects RGBA (4 channels). Expand the single-channel WASM buffer into RGBA.
     const rgbaMatrix = useMemo(() => {
-        const pixelCount = 512 * 512;
+        const pixelCount = HILBERT_DIM * HILBERT_DIM;
         const out = new Uint8Array(pixelCount * 4);
         const len = Math.min(matrix.length, pixelCount);
 
@@ -43,17 +61,41 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
     const getHilbertLayers = () => {
         const layers: any[] = [
             new BitmapLayer({
-                id: 'hilbert-bitmap', image: { width: 512, height: 512, data: rgbaMatrix },
-                bounds: [0, 0, 512, 512], pickable: true,
+                id: 'hilbert-bitmap', image: { width: HILBERT_DIM, height: HILBERT_DIM, data: rgbaMatrix },
+                bounds: [0, 0, HILBERT_DIM, HILBERT_DIM], pickable: true,
                 onClick: (info: any) => {
-                    if (info?.bitmapPixel) onJump(hilbert.xyToOffset(info.bitmapPixel[0], info.bitmapPixel[1]));
+                    if (!info?.bitmapPixel) return;
+                    const curveIndex = hilbert.xyToOffset(info.bitmapPixel[0], info.bitmapPixel[1]);
+                    const absoluteOffset = jumpOffsetFromIndex(curveIndex, HILBERT_TOTAL_POINTS, fileSize);
+                    onJumpToOffset(absoluteOffset);
                 }
             })
         ];
 
+        if (highEntropyRadarIndices.length > 0) {
+            layers.push(
+                new PolygonLayer({
+                    id: 'high-entropy-outline',
+                    data: highEntropyRadarIndices,
+                    getPolygon: (row: number) => [
+                        [0, row],
+                        [HILBERT_DIM, row],
+                        [HILBERT_DIM, row + 1],
+                        [0, row + 1],
+                    ],
+                    getFillColor: [255, 42, 42, 45],
+                    stroked: true,
+                    getLineColor: [255, 42, 42, 255],
+                    getLineWidth: 1,
+                    lineWidthUnits: 'pixels',
+                    pickable: false,
+                })
+            );
+        }
+
         if (selectionRange) {
-            const startXY = hilbert.offsetToXY(selectionRange.start);
-            const endXY = hilbert.offsetToXY(selectionRange.end);
+            const startXY = hilbert.offsetToXY(radarCurveIndexFromFileOffset(selectionRange.start, fileSize, HILBERT_TOTAL_POINTS));
+            const endXY = hilbert.offsetToXY(radarCurveIndexFromFileOffset(selectionRange.end, fileSize, HILBERT_TOTAL_POINTS));
             layers.push(new ScatterplotLayer({
                 id: 'markers',
                 data: [{ pos: [startXY[0] + 0.5, startXY[1] + 0.5], color: [0, 240, 255] }, { pos: [endXY[0] + 0.5, endXY[1] + 0.5], color: [255, 40, 40] }],
@@ -62,7 +104,7 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
         }
 
         if (highlightOffset !== null) {
-            const [x, y] = hilbert.offsetToXY(highlightOffset);
+            const [x, y] = hilbert.offsetToXY(radarCurveIndexFromFileOffset(highlightOffset, fileSize, HILBERT_TOTAL_POINTS));
             layers.push(new ScatterplotLayer({
                 id: 'reticle', data: [{ pos: [x + 0.5, y + 0.5] }],
                 getPosition: d => d.pos, getFillColor: [0, 0, 0, 0], getLineColor: [0, 240, 255],
@@ -96,7 +138,9 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
                 onClick={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
                     const percent = (e.clientX - rect.left) / rect.width;
-                    onJump(Math.floor(percent * (entropyMap.length * 256)));
+                    const total = entropyMap.length;
+                    const index = Math.min(total - 1, Math.max(0, Math.floor(percent * total)));
+                    onJumpToOffset(jumpOffsetFromIndex(index, total, fileSize));
                 }}
             />
         );
@@ -124,6 +168,28 @@ const Radar: React.FC<RadarProps> = ({ matrix, entropyMap = [], highlightOffset,
                 </div>
             </div>
             <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+                {cryptoMode && (
+                    <div
+                        style={{
+                            position: 'absolute',
+                            top: 6,
+                            right: 8,
+                            zIndex: 20,
+                            padding: '6px 10px',
+                            borderRadius: '6px',
+                            border: '2px solid #ff2a2a',
+                            background: 'rgba(20, 0, 0, 0.92)',
+                            color: '#ff2a2a',
+                            fontSize: '10px',
+                            fontWeight: 800,
+                            letterSpacing: '0.08em',
+                            pointerEvents: 'none',
+                            boxShadow: '0 0 16px rgba(255,42,42,0.35)',
+                        }}
+                    >
+                        CRYPTO: {cryptoMode}
+                    </div>
+                )}
                 {viewMode === 'HILBERT' ? (
                     <DeckGL
                         viewState={{ target: [256, 256, 0], zoom, minZoom: -2, maxZoom: 10 } as any}

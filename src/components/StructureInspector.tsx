@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Terminal, Copy, Check } from 'lucide-react';
-import { TlvNode } from '../types/analysis';
+import { TlvNode, CryptoMode } from '../types/analysis';
 import { getTagInfo } from '../utils/tag_dictionary';
 import { FileMetadata } from '../utils/export';
 
@@ -10,10 +10,66 @@ interface Props {
     fileMeta?: FileMetadata | null;
     inspectorContext?: 'file' | 'node' | 'trailing';
     trailingArtifacts?: string[];
+    cryptoMode?: CryptoMode | null;
+    protocolGuess?: string | null;
     onFocus?: (start: number, end: number) => void;
 }
 
-const StructureInspector: React.FC<Props> = ({ node, fileData, fileMeta, inspectorContext = 'node', trailingArtifacts, onFocus }) => {
+const ProtocolGuessBadge = ({ label }: { label: string }) => (
+    <div
+        style={{
+            border: '2px solid rgba(0, 240, 255, 0.65)',
+            borderRadius: '8px',
+            padding: '10px 14px',
+            marginBottom: '4px',
+            background: 'linear-gradient(135deg, rgba(0, 40, 50, 0.6), rgba(0, 15, 25, 0.85))',
+            boxShadow: '0 0 14px rgba(0, 240, 255, 0.2)',
+        }}
+    >
+        <div style={{ fontSize: '0.62rem', color: 'var(--accent-cyan, #00f0ff)', letterSpacing: '0.18em', fontWeight: 700 }}>
+            WEB PROTOCOL (HEURISTIC)
+        </div>
+        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#fff', marginTop: '6px', letterSpacing: '0.03em' }}>{label}</div>
+    </div>
+);
+
+function cryptoBadgeHeadline(mode: CryptoMode): string {
+    if (mode === 'AES-128/256') return 'AES (16-byte Block Cipher Detected)';
+    return 'DES/3DES (64-bit Block Cipher Suspected)';
+}
+
+const CryptoOverviewBadge = ({ mode }: { mode: CryptoMode }) => (
+    <div
+        style={{
+            border: '2px solid #ff2a2a',
+            borderRadius: '8px',
+            padding: '12px 14px',
+            marginBottom: '4px',
+            background: 'linear-gradient(135deg, rgba(80, 0, 0, 0.55), rgba(20, 0, 0, 0.75))',
+            boxShadow: '0 0 20px rgba(255, 42, 42, 0.25)',
+        }}
+    >
+        <div style={{ fontSize: '0.62rem', color: '#ff2a2a', letterSpacing: '0.2em', fontWeight: 700 }}>CRYPTOGRAPHIC MODE</div>
+        <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fff', marginTop: '8px', letterSpacing: '0.03em', lineHeight: 1.25 }}>
+            {cryptoBadgeHeadline(mode)}
+        </div>
+        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: '#ffb4b4', marginTop: '6px' }}>{mode}</div>
+        <div style={{ fontSize: '0.72rem', color: '#999', marginTop: '8px', lineHeight: 1.4 }}>
+            Lag-profile heuristic (e.g. spike at lag 16 for AES). Use Autocorrelation + Hex jump to correlate.
+        </div>
+    </div>
+);
+
+const StructureInspector: React.FC<Props> = ({
+    node,
+    fileData,
+    fileMeta,
+    inspectorContext = 'node',
+    trailingArtifacts,
+    cryptoMode = null,
+    protocolGuess = null,
+    onFocus,
+}) => {
     const [copied, setCopied] = useState<string | null>(null);
 
     const showTrailingAlerts = useMemo(() => {
@@ -25,6 +81,7 @@ const StructureInspector: React.FC<Props> = ({ node, fileData, fileMeta, inspect
     if (!node || !fileData) {
         return (
             <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {cryptoMode && <CryptoOverviewBadge mode={cryptoMode} />}
                 {showTrailingAlerts && (
                     <div style={{ border: '1px solid rgba(255, 42, 42, 0.35)', background: 'rgba(255, 42, 42, 0.08)', padding: '12px', borderRadius: '6px' }}>
                         <div style={{ fontSize: '0.65rem', color: '#ff2a2a', letterSpacing: '1px', marginBottom: '8px' }}>SECURITY ALERT</div>
@@ -99,6 +156,8 @@ const StructureInspector: React.FC<Props> = ({ node, fileData, fileMeta, inspect
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', height: '100%' }}>
+            {protocolGuess && <ProtocolGuessBadge label={protocolGuess} />}
+            {cryptoMode && <CryptoOverviewBadge mode={cryptoMode} />}
             {showTrailingAlerts && (
                 <div style={{ border: '1px solid rgba(255, 42, 42, 0.35)', background: 'rgba(255, 42, 42, 0.08)', padding: '12px', borderRadius: '6px' }}>
                     <div style={{ fontSize: '0.65rem', color: '#ff2a2a', letterSpacing: '1px', marginBottom: '8px' }}>SECURITY ALERT</div>

@@ -32,6 +32,77 @@ function post(msg: WorkerResponse) {
   (self as any).postMessage(msg);
 }
 
+/** Autocorrelation lag spikes (Phase 12): lag 16 → AES block alignment; lag 8 → DES/3DES. */
+function detectCryptoModeFromAutocorr(ac: number[]): 'AES-128/256' | 'DES/3DES' | null {
+  if (!ac || ac.length < 17) return null;
+  const spikeAt = (lag: number): boolean => {
+    const v = Number(ac[lag]);
+    if (!Number.isFinite(v)) return false;
+    const nb: number[] = [];
+    for (let d = -4; d <= 4; d++) {
+      const i = lag + d;
+      if (i >= 0 && i < ac.length && i !== lag) nb.push(Number(ac[i]));
+    }
+    const mean = nb.reduce((a, b) => a + b, 0) / Math.max(1, nb.length);
+    return mean > 0 && v > mean * 2.15 && v > 0.085;
+  };
+  const s8 = spikeAt(8);
+  const s16 = spikeAt(16);
+  const v8 = Number(ac[8]);
+  const v16 = Number(ac[16]);
+  if (s16 && (!s8 || (Number.isFinite(v16) && Number.isFinite(v8) ? v16 >= v8 : s16))) return 'AES-128/256';
+  if (s8) return 'DES/3DES';
+  if (s16) return 'AES-128/256';
+  return null;
+}
+
+/** HTTP/2 connection preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" */
+const H2_MAGIC_PREAMBLE = new Uint8Array([
+  0x50, 0x52, 0x49, 0x20, 0x2a, 0x20, 0x48, 0x54, 0x54, 0x50, 0x2f, 0x32, 0x2e, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x53, 0x4d, 0x0d, 0x0a, 0x0d, 0x0a
+]);
+
+/**
+ * H1 / H2 / H3 heuristics from captured header bytes + global entropy map (after radar sampling).
+ * Order: H2 (exact preface) → H1 (low entropy + HTTP/1 text) → H3 (high entropy + QUIC-ish first byte).
+ */
+function guessWebProtocol(headerBytes: Uint8Array, entropyMap: number[]): string | null {
+  if (headerBytes.length >= H2_MAGIC_PREAMBLE.length) {
+    let h2 = true;
+    for (let i = 0; i < H2_MAGIC_PREAMBLE.length; i++) {
+      if (headerBytes[i] !== H2_MAGIC_PREAMBLE[i]) {
+        h2 = false;
+        break;
+      }
+    }
+    if (h2) return 'H2 (HTTP/2)';
+  }
+
+  const n = entropyMap.length;
+  const avgEntropy = n > 0 ? entropyMap.reduce((a, b) => a + Number(b), 0) / n : 0;
+
+  const scanLen = Math.min(2048, headerBytes.length);
+  let prelude = '';
+  if (scanLen > 0) {
+    try {
+      prelude = new TextDecoder('utf-8', { fatal: false }).decode(headerBytes.subarray(0, scanLen));
+    } catch {
+      prelude = '';
+    }
+  }
+  const hasHttp11 = /HTTP\/1\.1/i.test(prelude);
+  const hasGet = /\bGET\s/i.test(prelude);
+
+  if (avgEntropy < 6.0 && (hasHttp11 || hasGet)) {
+    return 'H1 (HTTP/1.1)';
+  }
+
+  if (avgEntropy > 7.5 && headerBytes.length > 0 && (headerBytes[0] & 0x40) === 0x40) {
+    return 'H3 (QUIC)';
+  }
+
+  return null;
+}
+
 self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
   const data = evt.data;
   const id = data?.id ?? 0;
@@ -82,20 +153,41 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
 
       // --- 1) Header parse (telecom/crypto headers) ---
       const header = await readSlice(0, Math.min(HEADER_BYTES, fileSize));
+      const trailing_artifacts: string[] = [];
       let parsed_structures: any[] = [];
       try {
         if (wasmMod.parse_file_structure) {
-          parsed_structures = wasmMod.parse_file_structure(header);
+          const raw = wasmMod.parse_file_structure(header);
+          if (Array.isArray(raw)) {
+            parsed_structures = raw;
+          } else if (raw && typeof raw === 'object') {
+            if (Array.isArray((raw as any).nodes)) parsed_structures = (raw as any).nodes;
+            const events = (raw as any).parse_events;
+            if (Array.isArray(events)) {
+              for (const ev of events) {
+                if (typeof ev === 'string') trailing_artifacts.push(ev);
+              }
+            }
+          }
         }
       } catch {
         parsed_structures = [];
       }
 
+      let autocorrelation_graph: number[] = [];
+      try {
+        const hdrAnalysis = wasmMod.analyze(header);
+        const ac = hdrAnalysis?.autocorrelation_graph;
+        if (Array.isArray(ac)) {
+          autocorrelation_graph = ac.map((x: unknown) => Number(x));
+        }
+      } catch {
+        autocorrelation_graph = [];
+      }
+
       // --- 2) Footer read (trailing signatures/footers) ---
       const footerStart = Math.max(0, fileSize - FOOTER_BYTES);
       const footer = await readSlice(footerStart, fileSize);
-
-      const trailing_artifacts: string[] = [];
 
       const hasBytes = (hay: Uint8Array, needle: number[]) => {
         if (needle.length === 0) return true;
@@ -152,15 +244,31 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
         hilbert_matrix.fill(v, rowOff, rowOff + W);
       }
 
+      const ENTROPY_HIGH = 6.2;
+      const high_entropy_radar_indices = entropy_map
+        .map((e, i) => (Number(e) >= ENTROPY_HIGH ? i : -1))
+        .filter((i) => i >= 0);
+      const crypto_mode = detectCryptoModeFromAutocorr(autocorrelation_graph);
+      const protocol_guess = guessWebProtocol(header, entropy_map);
+
+      for (const line of trailing_artifacts) {
+        if (typeof line === 'string' && line.includes('Resync Event')) {
+          console.info('[CIFAD worker]', line);
+        }
+      }
+
       post({
         type: 'result',
         id,
         result: {
           entropy_map,
           hilbert_matrix,
-          autocorrelation_graph: [],
+          autocorrelation_graph,
           parsed_structures,
-          trailing_artifacts
+          trailing_artifacts,
+          crypto_mode,
+          high_entropy_radar_indices,
+          protocol_guess
         }
       });
 

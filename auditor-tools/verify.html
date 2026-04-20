@@ -56,6 +56,26 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
     }
+    .drop-zone {
+      border-radius: 10px;
+      padding: 0.75rem;
+      margin: 0 -0.75rem;
+      border: 2px dashed transparent;
+      transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+    }
+    .drop-zone.drag-active {
+      border-color: var(--accent);
+      background: rgba(88, 166, 255, 0.08);
+      box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+    }
+    .drop-zone.drag-active textarea {
+      border-color: var(--accent);
+    }
+    .drop-hint {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0 0 0.5rem;
+    }
     .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
     button {
       font: inherit;
@@ -104,12 +124,14 @@
       Standalone auditor tool (no build, no npm). Paste the full exported JSON. The tool parses JSON,
       removes <code>integrity_seal</code> and <code>verification_metadata</code>, then hashes
       <code>UTF-8(JSON.stringify(payload))</code> with compact serialization — matching CIFAD export semantics.
+      You can <strong>paste</strong> JSON or <strong>drop a report file</strong> onto the zone below; drop runs verify automatically.
       <code>crypto.subtle</code> requires a <strong>secure context</strong> (HTTPS or <code>http://localhost</code>); opening this file as <code>file://</code> may be blocked by the browser.
     </p>
   </header>
   <main>
-    <div>
-      <label for="json-input">Pasted report JSON</label>
+    <div id="drop-zone" class="drop-zone" aria-label="Report JSON paste or drop zone">
+      <label for="json-input">Report JSON (paste or drop file)</label>
+      <p class="drop-hint">Drop a <code>.json</code> file here or paste below, then use Verify.</p>
       <textarea id="json-input" spellcheck="false" placeholder='{ "timestamp": "...", ... }'></textarea>
     </div>
     <div class="row">
@@ -125,6 +147,7 @@
       const input = document.getElementById('json-input');
       const btn = document.getElementById('verify-btn');
       const resultEl = document.getElementById('result');
+      const dropZone = document.getElementById('drop-zone');
 
       function show(kind, title, lines) {
         resultEl.className = 'result visible ' + kind;
@@ -151,7 +174,12 @@
         return t;
       }
 
-      btn.addEventListener('click', async function () {
+      function setDragActive(active) {
+        if (active) dropZone.classList.add('drag-active');
+        else dropZone.classList.remove('drag-active');
+      }
+
+      async function verifySeal() {
         resultEl.classList.remove('visible', 'pass', 'fail', 'warn');
         resultEl.innerHTML = '';
 
@@ -164,7 +192,7 @@
 
         var raw = input.value;
         if (!raw.trim()) {
-          show('fail', 'FAIL', ['No JSON pasted.']);
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['No JSON to verify.']);
           return;
         }
 
@@ -172,19 +200,19 @@
         try {
           root = JSON.parse(raw);
         } catch (e) {
-          show('fail', 'FAIL', ['JSON parse error: <strong>' + String(e.message || e) + '</strong>']);
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['JSON parse error: <strong>' + String(e.message || e) + '</strong>']);
           return;
         }
 
         if (root === null || typeof root !== 'object' || Array.isArray(root)) {
-          show('fail', 'FAIL', ['Root JSON value must be a plain object.']);
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['Root JSON value must be a plain object.']);
           return;
         }
 
         var sealRaw = root.integrity_seal;
         var normalizedSeal = normalizeSeal(sealRaw);
         if (!normalizedSeal) {
-          show('fail', 'FAIL', [
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', [
             'Missing or invalid <code>integrity_seal</code> (expected 64 lowercase hex characters).'
           ]);
           return;
@@ -200,7 +228,7 @@
         try {
           digestBuf = await crypto.subtle.digest('SHA-256', utf8);
         } catch (e) {
-          show('fail', 'FAIL', ['Hash error: <strong>' + String(e.message || e) + '</strong>']);
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['Hash error: <strong>' + String(e.message || e) + '</strong>']);
           return;
         }
 
@@ -208,17 +236,68 @@
         var ok = computed === normalizedSeal;
 
         if (ok) {
-          show('pass', 'PASS', [
+          show('pass', '[PASS] INTEGRITY SEAL VERIFIED', [
             'Computed SHA-256 matches <code>integrity_seal</code>.',
             '<strong>Canonical bytes length (UTF-8):</strong> ' + utf8.length
           ]);
         } else {
-          show('fail', 'FAIL', [
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', [
             '<strong>Expected (seal):</strong> ' + normalizedSeal,
             '<strong>Computed:</strong> ' + computed,
             '<strong>Canonical JSON length (chars):</strong> ' + canonical.length
           ]);
         }
+      }
+
+      btn.addEventListener('click', function () {
+        verifySeal();
+      });
+
+      dropZone.addEventListener('dragover', function (e) {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        setDragActive(true);
+      });
+
+      dropZone.addEventListener('dragleave', function (e) {
+        e.preventDefault();
+        var related = e.relatedTarget;
+        if (!related || !dropZone.contains(related)) {
+          setDragActive(false);
+        }
+      });
+
+      dropZone.addEventListener('drop', function (e) {
+        e.preventDefault();
+        setDragActive(false);
+
+        var files = e.dataTransfer && e.dataTransfer.files;
+        if (!files || files.length === 0) {
+          resultEl.classList.remove('visible', 'pass', 'fail', 'warn');
+          resultEl.innerHTML = '';
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['No file in drop operation.']);
+          return;
+        }
+
+        var file = files[0];
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+          var text = ev.target && ev.target.result;
+          if (typeof text !== 'string') {
+            resultEl.classList.remove('visible', 'pass', 'fail', 'warn');
+            resultEl.innerHTML = '';
+            show('fail', '[FAIL] INTEGRITY COMPROMISED', ['Could not read file as text.']);
+            return;
+          }
+          input.value = text;
+          verifySeal();
+        };
+        reader.onerror = function () {
+          resultEl.classList.remove('visible', 'pass', 'fail', 'warn');
+          resultEl.innerHTML = '';
+          show('fail', '[FAIL] INTEGRITY COMPROMISED', ['FileReader failed to read the dropped file.']);
+        };
+        reader.readAsText(file);
       });
     })();
   </script>

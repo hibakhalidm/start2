@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -259,28 +258,128 @@ pub struct TlvNode {
     pub children: Vec<TlvNode>,
 }
 
-#[wasm_bindgen]
-pub fn parse_file_structure(data: &[u8]) -> Result<JsValue, JsValue> {
-    let mut nodes = Vec::new();
-    let mut cursor = 0;
-
-    while cursor < data.len() {
-        if let Some(node) = parse_tlv_node(data, cursor, 0) {
-            cursor = node.offset + node.total_len;
-            nodes.push(node);
-        } else {
-            cursor += 1;
-        }
-    }
-    Ok(serde_wasm_bindgen::to_value(&nodes).map_err(|e| e.to_string())?)
+/// TLV parse output for JS: tree nodes plus human-readable parse/resync diagnostics.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ParseFileStructureOutput {
+    pub nodes: Vec<TlvNode>,
+    pub parse_events: Vec<String>,
 }
 
-fn parse_tlv_node(data: &[u8], offset: usize, depth: usize) -> Option<TlvNode> {
+#[wasm_bindgen]
+pub fn parse_file_structure(data: &[u8]) -> Result<JsValue, JsValue> {
+    let out = parse_file_structure_inner(data);
+    Ok(serde_wasm_bindgen::to_value(&out).map_err(|e| e.to_string())?)
+}
+
+fn parse_file_structure_inner(data: &[u8]) -> ParseFileStructureOutput {
+    let mut nodes = Vec::new();
+    let mut parse_events = Vec::new();
+    let mut cursor = 0usize;
+    // Hard cap: each iteration advances `cursor` by ≥1 or consumes a TLV; prevents infinite loops on pathological input.
+    let max_iters = data.len().saturating_mul(8).saturating_add(64);
+    let mut iters = 0usize;
+
+    while cursor < data.len() && iters < max_iters {
+        iters += 1;
+        match parse_tlv_node(data, cursor, 0, &mut parse_events) {
+            Some(node) => {
+                cursor = node.offset + node.total_len;
+                nodes.push(node);
+            }
+            None => {
+                let from = cursor;
+                let resume = if from + 1 < data.len() {
+                    resync_to_next_tag(from + 1, data)
+                } else {
+                    None
+                };
+                match resume {
+                    Some(next) if next > from => {
+                        parse_events.push(format!(
+                            "Resync Event: loss-of-sync at offset {}; resumed at {} (anchor tag 0x{:02X})",
+                            from, next, data[next]
+                        ));
+                        cursor = next;
+                    }
+                    _ => {
+                        if from + 1 < data.len() {
+                            parse_events.push(format!(
+                                "Resync Event: no anchor found scanning from offset {}; advancing 1 byte",
+                                from + 1
+                            ));
+                        }
+                        cursor = (from + 1).min(data.len());
+                    }
+                }
+            }
+        }
+    }
+
+    if iters >= max_iters {
+        parse_events.push(
+            "Resync Event: parse guard triggered (iteration cap); stopping top-level scan".to_string(),
+        );
+    }
+
+    ParseFileStructureOutput {
+        nodes,
+        parse_events,
+    }
+}
+
+/// Heuristic anchor bytes for BER/telecom TLV resynchronization after corruption.
+/// Accepts common structural tags: SEQUENCE/SET, OID, INTEGER/OCTET STRING, and
+/// context-specific constructed tags (0xA0–0xBF) typical of ETSI-style wrappers.
+fn is_resync_anchor_tag(b: u8) -> bool {
+    matches!(
+        b,
+        0x30 | 0x31 | 0x06 | 0x02 | 0x04 | 0xA0..=0xBF
+    )
+}
+
+/// Byte-scan from `start` (inclusive) for the next plausible TLV tag; returns `None` if none found.
+fn resync_to_next_tag(start: usize, bytes: &[u8]) -> Option<usize> {
+    if start >= bytes.len() {
+        return None;
+    }
+    for i in start..bytes.len() {
+        if is_resync_anchor_tag(bytes[i]) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Same as [`resync_to_next_tag`] but never returns an offset at or beyond `end_limit`
+/// (exclusive), so child TLV scanning stays inside the parent value window.
+fn resync_to_next_tag_bounded(start: usize, end_limit: usize, bytes: &[u8]) -> Option<usize> {
+    let end = end_limit.min(bytes.len());
+    if start >= end {
+        return None;
+    }
+    for i in start..end {
+        if is_resync_anchor_tag(bytes[i]) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn parse_tlv_node(
+    data: &[u8],
+    offset: usize,
+    depth: usize,
+    parse_events: &mut Vec<String>,
+) -> Option<TlvNode> {
     if offset >= data.len() || depth > 64 {
         return None;
     }
 
     let tag = data[offset];
+    // High-tag-number form (0x1F in lower five bits) uses additional tag octets — unsupported here; fail-safe resync.
+    if (tag & 0x1F) == 0x1F {
+        return None;
+    }
     let is_container = (tag & 0x20) == 0x20;
     // NOTE: This parser currently supports single-octet tag identifiers.
     // Multi-byte tags and indefinite-length encoding are treated as "no parse".
@@ -320,13 +419,32 @@ fn parse_tlv_node(data: &[u8], offset: usize, depth: usize) -> Option<TlvNode> {
     if is_container && value_len > 0 {
         let mut child_cursor = value_offset;
         let end_limit = value_offset + value_len;
+        let mut child_guard = 0usize;
+        let child_max = value_len.saturating_mul(8).saturating_add(32);
 
-        while child_cursor < end_limit {
-            if let Some(child) = parse_tlv_node(data, child_cursor, depth + 1) {
-                child_cursor = child.offset + child.total_len;
-                children.push(child);
-            } else {
-                break;
+        while child_cursor < end_limit && child_guard < child_max {
+            child_guard += 1;
+            match parse_tlv_node(data, child_cursor, depth + 1, parse_events) {
+                Some(child) => {
+                    child_cursor = child.offset + child.total_len;
+                    children.push(child);
+                }
+                None => match resync_to_next_tag_bounded(child_cursor + 1, end_limit, data) {
+                    Some(new_off) if new_off > child_cursor => {
+                        parse_events.push(format!(
+                            "Resync Event: loss-of-sync inside container (parent offset {}); child at {}; resumed at {} (anchor tag 0x{:02X})",
+                            offset, child_cursor, new_off, data[new_off]
+                        ));
+                        child_cursor = new_off;
+                    }
+                    _ => {
+                        parse_events.push(format!(
+                            "Resync Event: no structural anchor before container end (offset {}) from child offset {}",
+                            end_limit, child_cursor
+                        ));
+                        break;
+                    }
+                },
             }
         }
     }
@@ -357,14 +475,14 @@ fn parse_tlv_node(data: &[u8], offset: usize, depth: usize) -> Option<TlvNode> {
 /// Golden-master regression tests for Phase 1 `TlvNode` contract (offsets, lengths, tag).
 #[cfg(test)]
 mod tlv_golden_tests {
-    use super::parse_tlv_node;
+    use super::{parse_file_structure_inner, parse_tlv_node};
 
     /// Primitive OCTET STRING: tag 0x04, definite short length 2, value `41 42`.
     /// Layout: [tag][len][v0][v1] => header_len=2, value_offset=2, value_len=2, total_len=4.
     #[test]
     fn golden_octet_string_primitive_contract() {
         let data: [u8; 4] = [0x04, 0x02, 0x41, 0x42];
-        let n = parse_tlv_node(&data, 0, 0).expect("must parse primitive OCTET STRING");
+        let n = parse_tlv_node(&data, 0, 0, &mut Vec::new()).expect("must parse primitive OCTET STRING");
 
         assert_eq!(n.tag, 0x04, "tag byte");
         assert_eq!(n.offset, 0);
@@ -381,7 +499,7 @@ mod tlv_golden_tests {
     fn golden_constructed_sequence_contract() {
         // 0xA1 0x06 | 0x02 0x01 0x2A | 0x04 0x01 0xFF
         let data: [u8; 8] = [0xA1, 0x06, 0x02, 0x01, 0x2A, 0x04, 0x01, 0xFF];
-        let root = parse_tlv_node(&data, 0, 0).expect("must parse constructed node");
+        let root = parse_tlv_node(&data, 0, 0, &mut Vec::new()).expect("must parse constructed node");
 
         assert_eq!(root.tag, 0xA1);
         assert_eq!(root.offset, 0);
@@ -413,7 +531,7 @@ mod tlv_golden_tests {
     #[test]
     fn golden_long_form_length_contract() {
         let data: [u8; 4] = [0x04, 0x81, 0x01, 0x7F];
-        let n = parse_tlv_node(&data, 0, 0).expect("must parse long-form length");
+        let n = parse_tlv_node(&data, 0, 0, &mut Vec::new()).expect("must parse long-form length");
 
         assert_eq!(n.tag, 0x04);
         assert_eq!(n.header_len, 3, "1 tag + 0x81 + 1 length octet");
@@ -421,5 +539,39 @@ mod tlv_golden_tests {
         assert_eq!(n.value_offset, 3);
         assert_eq!(n.total_len, 4);
         assert_eq!(data[n.value_offset], 0x7F);
+    }
+
+    /// Garbage prefix then a valid primitive: top-level resync must find 0x04 and emit a Resync Event.
+    #[test]
+    fn resync_skips_corrupt_prefix_then_parses_tlv() {
+        // 3 garbage bytes, then OCTET STRING 04 02 41 42
+        let data: [u8; 7] = [0xFF, 0x00, 0x7F, 0x04, 0x02, 0x41, 0x42];
+        let out = parse_file_structure_inner(&data);
+        assert!(
+            out.parse_events.iter().any(|e| e.contains("Resync Event")),
+            "expected resync log, got {:?}",
+            out.parse_events
+        );
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(out.nodes[0].tag, 0x04);
+        assert_eq!(out.nodes[0].offset, 3);
+    }
+
+    /// Invalid length inside a SEQUENCE: child resync finds next TLV inside the value window.
+    #[test]
+    fn resync_inside_container_finds_second_child() {
+        // SEQUENCE len=9: valid INTEGER 02 01 2A, then corrupt (FF FF), then OCTET STRING 04 01 00
+        let data: [u8; 11] = [0x30, 0x09, 0x02, 0x01, 0x2A, 0xFF, 0xFF, 0x04, 0x01, 0x00, 0x00];
+        let out = parse_file_structure_inner(&data);
+        let root = out.nodes.first().expect("sequence");
+        assert_eq!(root.tag, 0x30);
+        assert!(
+            out.parse_events.iter().any(|e| e.contains("inside container")),
+            "expected inner resync, got {:?}",
+            out.parse_events
+        );
+        assert_eq!(root.children.len(), 2, "integer + octet string after resync");
+        assert_eq!(root.children[0].tag, 0x02);
+        assert_eq!(root.children[1].tag, 0x04);
     }
 }

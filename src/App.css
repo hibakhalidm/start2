@@ -78,6 +78,68 @@ select:focus {
   }
 }
 
+/* UAT: loading overlay — GPU-friendly (transform/opacity only on animated nodes) */
+.crunching-matrix-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.crunching-matrix-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+
+.crunching-matrix-card {
+  position: relative;
+  z-index: 1;
+  padding: 28px 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  background: rgba(8, 10, 14, 0.92);
+  box-shadow: 0 0 40px rgba(0, 240, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.crunching-matrix-spinner {
+  width: 44px;
+  height: 44px;
+  border: 3px solid rgba(0, 240, 255, 0.15);
+  border-top-color: var(--accent-cyan);
+  border-radius: 50%;
+  will-change: transform;
+  animation: crunching-spin 0.85s linear infinite;
+}
+
+@keyframes crunching-spin {
+  to {
+    transform: rotate3d(0, 0, 1, 360deg);
+  }
+}
+
+.crunching-matrix-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  color: var(--accent-cyan);
+}
+
+.crunching-matrix-sub {
+  font-size: 10px;
+  color: #666;
+  letter-spacing: 0.12em;
+}
+
 .drop-active {
   animation: pulse-border 2s infinite;
   background: rgba(0, 240, 255, 0.05);

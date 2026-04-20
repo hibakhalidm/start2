@@ -25,7 +25,11 @@ export const generateReport = async (file: FileMetadata | null, fileData: Uint8A
     const reportPayload = {
         timestamp: new Date().toISOString(),
         file_metadata: { ...file, sha256_hash: fileHash },
-        intelligence: { detected_standard: standard },
+        intelligence: {
+            detected_standard: standard,
+            /** UAT / audit: changing this value invalidates integrity_seal when re-verified. */
+            threat_score: 85,
+        },
         parsed_content: analysis?.parsed_structures || "No structures detected"
     };
 
