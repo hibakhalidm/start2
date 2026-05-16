@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import DeckGL from '@deck.gl/react';
 import { BitmapLayer, ScatterplotLayer, PolygonLayer } from '@deck.gl/layers';
+import { COORDINATE_SYSTEM, OrthographicView } from '@deck.gl/core';
 import { HilbertCurve } from '../utils/hilbert';
 import { jumpOffsetFromIndex, radarCurveIndexFromFileOffset } from '../utils/spatialCorrelation';
 import type { CryptoMode } from '../types/analysis';
@@ -33,7 +34,13 @@ const Radar: React.FC<RadarProps> = ({
     onJumpToOffset,
 }) => {
     const [viewMode, setViewMode] = useState<'HILBERT' | 'LINEAR'>('HILBERT');
-    const [zoom, setZoom] = useState(0);
+    const [orthoViewState, setOrthoViewState] = useState<any>({
+        id: 'ortho',
+        target: [256, 256, 0],
+        zoom: 0,
+        minZoom: -2,
+        maxZoom: 10,
+    });
 
     // Deck.gl BitmapLayer expects RGBA (4 channels). Expand the single-channel WASM buffer into RGBA.
     const rgbaMatrix = useMemo(() => {
@@ -62,6 +69,7 @@ const Radar: React.FC<RadarProps> = ({
         const layers: any[] = [
             new BitmapLayer({
                 id: 'hilbert-bitmap', image: { width: HILBERT_DIM, height: HILBERT_DIM, data: rgbaMatrix },
+                coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
                 bounds: [0, 0, HILBERT_DIM, HILBERT_DIM], pickable: true,
                 onClick: (info: any) => {
                     if (!info?.bitmapPixel) return;
@@ -77,6 +85,7 @@ const Radar: React.FC<RadarProps> = ({
                 new PolygonLayer({
                     id: 'high-entropy-outline',
                     data: highEntropyRadarIndices,
+                    coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
                     getPolygon: (row: number) => [
                         [0, row],
                         [HILBERT_DIM, row],
@@ -99,6 +108,7 @@ const Radar: React.FC<RadarProps> = ({
             layers.push(new ScatterplotLayer({
                 id: 'markers',
                 data: [{ pos: [startXY[0] + 0.5, startXY[1] + 0.5], color: [0, 240, 255] }, { pos: [endXY[0] + 0.5, endXY[1] + 0.5], color: [255, 40, 40] }],
+                coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
                 getPosition: d => d.pos, getFillColor: d => d.color, getRadius: 6, updateTriggers: { data: selectionRange }
             }));
         }
@@ -107,6 +117,7 @@ const Radar: React.FC<RadarProps> = ({
             const [x, y] = hilbert.offsetToXY(radarCurveIndexFromFileOffset(highlightOffset, fileSize, HILBERT_TOTAL_POINTS));
             layers.push(new ScatterplotLayer({
                 id: 'reticle', data: [{ pos: [x + 0.5, y + 0.5] }],
+                coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
                 getPosition: d => d.pos, getFillColor: [0, 0, 0, 0], getLineColor: [0, 240, 255],
                 stroked: true, radiusMinPixels: 10, getRadius: 20, updateTriggers: { getPosition: highlightOffset }
             }));
@@ -127,8 +138,9 @@ const Radar: React.FC<RadarProps> = ({
             const step = width / entropyMap.length;
             entropyMap.forEach((val, i) => {
                 if (val > 7.0) ctx.fillStyle = '#ff2a2a';
-                else if (val < 4.8) ctx.fillStyle = '#3b82f6';
-                else ctx.fillStyle = '#1a1a20';
+                // Avoid "solid blue box" failure mode: low-entropy regions render as dark neutral.
+                else if (val < 4.8) ctx.fillStyle = '#0a0a0a';
+                else ctx.fillStyle = '#121218';
                 ctx.fillRect(i * step, 0, Math.max(1, step), height);
             });
         }, [entropyMap]);
@@ -149,16 +161,16 @@ const Radar: React.FC<RadarProps> = ({
     return (
         <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
             <div style={{ height: '32px', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', padding: '0 10px', justifyContent: 'space-between', background: '#0a0a0f' }}>
-                <span style={{ fontSize: '10px', color: '#555', letterSpacing: '1px' }}>GLOBAL RADAR</span>
+                <span style={{ fontSize: '10px', color: '#888', letterSpacing: '0.12em', fontWeight: 700 }}>GLOBAL SIGNAL</span>
 
                 <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
                     {/* Zoom Controls */}
                     {viewMode === 'HILBERT' && (
                         <div style={{ display: 'flex', gap: '2px', marginRight: '10px', borderRight: '1px solid #333', paddingRight: '10px' }}>
-                            <button onClick={() => setZoom(z => Math.max(z - 1, -2))} title="Zoom Out" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><ZoomOut size={12} /></button>
-                            <span style={{ fontSize: '9px', color: '#555', minWidth: '20px', textAlign: 'center' }}>{Math.round(zoom * 10) / 10}x</span>
-                            <button onClick={() => setZoom(z => Math.min(z + 1, 10))} title="Zoom In" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><ZoomIn size={12} /></button>
-                            <button onClick={() => setZoom(0)} title="Reset Zoom" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><Maximize size={12} /></button>
+                            <button onClick={() => setOrthoViewState((v: any) => ({ ...v, zoom: Math.max((v?.zoom ?? 0) - 1, -2) }))} title="Zoom Out" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><ZoomOut size={12} /></button>
+                            <span style={{ fontSize: '9px', color: '#555', minWidth: '20px', textAlign: 'center' }}>{Math.round((orthoViewState?.zoom ?? 0) * 10) / 10}x</span>
+                            <button onClick={() => setOrthoViewState((v: any) => ({ ...v, zoom: Math.min((v?.zoom ?? 0) + 1, 10) }))} title="Zoom In" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><ZoomIn size={12} /></button>
+                            <button onClick={() => setOrthoViewState((v: any) => ({ ...v, zoom: 0, target: [256, 256, 0] }))} title="Reset Zoom" style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#888' }}><Maximize size={12} /></button>
                         </div>
                     )}
 
@@ -167,7 +179,17 @@ const Radar: React.FC<RadarProps> = ({
                     <button onClick={() => setViewMode('LINEAR')} style={{ background: viewMode === 'LINEAR' ? 'var(--accent-cyan)' : 'transparent', border: '1px solid #333', padding: '2px', cursor: 'pointer' }}><Activity size={14} color={viewMode === 'LINEAR' ? '#000' : '#888'} /></button>
                 </div>
             </div>
-            <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+            <div
+                style={{
+                    flex: 1,
+                    width: '100%',
+                    minHeight: '300px',
+                    height: '100%',
+                    position: 'relative',
+                    overflow: 'hidden',
+                    background: '#0a0a0a',
+                }}
+            >
                 {cryptoMode && (
                     <div
                         style={{
@@ -191,14 +213,18 @@ const Radar: React.FC<RadarProps> = ({
                     </div>
                 )}
                 {viewMode === 'HILBERT' ? (
-                    <DeckGL
-                        viewState={{ target: [256, 256, 0], zoom, minZoom: -2, maxZoom: 10 } as any}
-                        onViewStateChange={({ viewState }: any) => setZoom(viewState.zoom)}
-                        controller={true}
-                        layers={getHilbertLayers()}
-                        getCursor={() => 'crosshair'}
-                        style={{ background: '#000' }}
-                    />
+                    <div style={{ position: 'relative', flex: 1, width: '100%', minHeight: '300px', height: '100%' }}>
+                        <DeckGL
+                            views={new OrthographicView({ id: 'ortho', controller: true })}
+                            viewState={orthoViewState}
+                            onViewStateChange={({ viewState }: any) => setOrthoViewState(viewState)}
+                            layers={getHilbertLayers()}
+                            getCursor={() => 'crosshair'}
+                            width="100%"
+                            height="100%"
+                            style={{ position: 'absolute', top: '0px', left: '0px', width: '100%', height: '100%', background: '#0a0a0a' }}
+                        />
+                    </div>
                 ) : <LinearView />}
             </div>
         </div>

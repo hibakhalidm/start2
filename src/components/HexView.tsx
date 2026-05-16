@@ -21,6 +21,7 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
     const rowCount = Math.ceil(fileSize / stride);
     const [isDragging, setIsDragging] = useState(false);
     const [dragStart, setDragStart] = useState<number | null>(null);
+    const [dragMoved, setDragMoved] = useState(false);
     const [cacheEpoch, setCacheEpoch] = useState(0);
     const paginator = useHexPaginator(file, fileSize);
     const epochBumpScheduledRef = useRef(false);
@@ -41,9 +42,30 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
         }
     }));
 
-    const handleByteDown = (index: number) => { setIsDragging(true); setDragStart(index); onSelect(index, index); };
-    const handleByteEnter = (index: number) => { if (isDragging && dragStart !== null) onSelect(Math.min(dragStart, index), Math.max(dragStart, index)); };
-    const handleMouseUp = () => { setIsDragging(false); setDragStart(null); };
+    const handleByteDown = (index: number) => {
+        setIsDragging(true);
+        setDragStart(index);
+        setDragMoved(false);
+        // Initial click-down selects exactly one byte.
+        onSelect(index, index);
+    };
+
+    const handleByteEnter = (index: number) => {
+        if (isDragging && dragStart !== null) {
+            if (index !== dragStart) setDragMoved(true);
+            onSelect(Math.min(dragStart, index), Math.max(dragStart, index));
+        }
+    };
+
+    const handleMouseUp = () => {
+        // If the user simply clicked (no drag), force single-byte selection.
+        if (dragStart !== null && !dragMoved) {
+            onSelect(dragStart, dragStart);
+        }
+        setIsDragging(false);
+        setDragStart(null);
+        setDragMoved(false);
+    };
 
     const Row = ({ index, style, data }: any) => {
         const offset = index * stride;
@@ -71,12 +93,22 @@ const HexView = forwardRef<HexViewRef, HexViewProps>(({
                 <span style={{ color: '#555', marginRight: '16px', minWidth: '80px' }}>{offset.toString(16).padStart(8, '0').toUpperCase()}</span>
                 <div style={{ display: 'flex', marginRight: '16px', flexWrap: 'nowrap' }}>
                     {rowData.map(({ val, idx }) => {
-                        const isSelected = selectionRange && idx >= selectionRange.start && idx <= selectionRange.end;
-                        const isHovered = !isSelected && hoverRange && idx >= hoverRange.start && idx < hoverRange.end; // <--- GHOST LOGIC
+                        // Inclusive selection bounds (fix selection bleed).
+                        const isSelected = !!selectionRange && idx >= selectionRange.start && idx <= selectionRange.end;
+                        const isHovered = !isSelected && !!hoverRange && idx >= hoverRange.start && idx <= hoverRange.end; // inclusive hover bounds
 
                         return (
                             <span
-                                key={idx} onMouseDown={() => handleByteDown(idx)} onMouseEnter={() => handleByteEnter(idx)} onMouseUp={handleMouseUp}
+                                key={idx}
+                                onMouseDown={() => handleByteDown(idx)}
+                                onMouseEnter={() => handleByteEnter(idx)}
+                                onMouseUp={handleMouseUp}
+                                onClick={(e) => {
+                                    // CRITICAL: stop bubbling to parent rows; always select exactly this byte.
+                                    e.stopPropagation();
+                                    e.preventDefault();
+                                    onSelect(idx, idx);
+                                }}
                                 style={{
                                     marginRight: '6px',
                                     color: isSelected ? '#000' : (isHovered ? 'var(--accent-cyan)' : '#a5b3ce'),

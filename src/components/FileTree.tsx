@@ -29,8 +29,9 @@ const TreeNode: React.FC<{
     const [expanded, setExpanded] = useState(false);
     const nodeRef = useRef<HTMLDivElement>(null);
     const hasChildren = node.children && node.children.length > 0;
-    const endOffset = node.offset + node.total_len;
-    const containsSelection = selectionOffset !== undefined && selectionOffset !== null && selectionOffset >= node.offset && selectionOffset < endOffset;
+    const endOffsetExclusive = node.offset + node.total_len;
+    const endOffsetInclusive = Math.max(node.offset, endOffsetExclusive - 1);
+    const containsSelection = selectionOffset !== undefined && selectionOffset !== null && selectionOffset >= node.offset && selectionOffset < endOffsetExclusive;
 
     useEffect(() => { if (containsSelection && hasChildren) setExpanded(true); }, [containsSelection, hasChildren]);
     useEffect(() => { if (containsSelection && !hasChildren && nodeRef.current) nodeRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, [containsSelection, hasChildren]);
@@ -45,11 +46,11 @@ const TreeNode: React.FC<{
                     color: containsSelection && !hasChildren ? '#fff' : '#aaa',
                 }}
                 onClick={(e) => {
-                    e.stopPropagation(); onSelect(node.offset, endOffset);
+                    e.stopPropagation(); onSelect(node.offset, endOffsetInclusive);
                     if (onNodeClick) onNodeClick(node);
                     if (hasChildren) setExpanded(!expanded);
                 }}
-                onMouseEnter={(e) => { e.stopPropagation(); onHover({ start: node.offset, end: endOffset }); }}
+                onMouseEnter={(e) => { e.stopPropagation(); onHover({ start: node.offset, end: endOffsetInclusive }); }}
                 onMouseLeave={() => onHover(null)}
             >
                 {hasChildren ? (expanded ? <ChevronDown size={12} color="#555" /> : <ChevronRight size={12} color="#555" />) : <span style={{ width: '12px' }} />}
@@ -79,7 +80,8 @@ const FileTree: React.FC<Props> = ({
     onSelectFileRoot,
     onSelectTrailingArtifacts
 }) => {
-    const [viewMode, setViewMode] = useState<'simple' | 'detailed'>('simple');
+    // Default to TREE so TLV decode is immediately usable.
+    const [viewMode, setViewMode] = useState<'simple' | 'detailed'>('detailed');
     const [isMinimized, setIsMinimized] = useState(false);
 
     if (!file) return <div style={{ padding: '30px', color: '#444', fontSize: '0.75rem', textAlign: 'center' }}>NO SIGNAL SOURCE</div>;
@@ -131,7 +133,7 @@ const FileTree: React.FC<Props> = ({
                             {/* NO BOXES: Just sleek rows separated by 1px gaps */}
                             {simpleSections.map((sec, i) => (
                                 <div
-                                    key={i} onClick={() => onSelectRange(sec.start, sec.end)}
+                                    key={i} onClick={() => onSelectRange(sec.start, Math.max(sec.start, sec.end - 1))}
                                     style={{ padding: '12px', background: '#0a0a0a', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderLeft: `2px solid ${sec.color}` }}
                                 >
                                     <div style={{ color: '#ccc', fontSize: '0.75rem' }}>{sec.name}</div>
@@ -147,7 +149,7 @@ const FileTree: React.FC<Props> = ({
                             <div
                                 onClick={() => {
                                     const footerStart = Math.max(0, fileSize - 64 * 1024);
-                                    onSelectRange(footerStart, fileSize);
+                                    onSelectRange(footerStart, Math.max(footerStart, fileSize - 1));
                                     onSelectTrailingArtifacts?.();
                                 }}
                                 style={{
@@ -158,7 +160,19 @@ const FileTree: React.FC<Props> = ({
                                 }}
                             >
                                 <div style={{ color: '#eee', fontSize: '0.75rem', marginBottom: '6px' }}>Detected {trailingArtifacts.length} trailing signal(s)</div>
-                                <div style={{ color: '#777', fontSize: '0.65rem', lineHeight: '1.4' }}>
+                                <div
+                                    title="Hover to see full log"
+                                    style={{
+                                        color: '#777',
+                                        fontSize: '0.65rem',
+                                        lineHeight: '1.4',
+                                        display: '-webkit-box',
+                                        WebkitLineClamp: 4 as any,
+                                        WebkitBoxOrient: 'vertical' as any,
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                    }}
+                                >
                                     {trailingArtifacts.slice(0, 4).join(' • ')}
                                     {trailingArtifacts.length > 4 ? ' • …' : ''}
                                 </div>

@@ -49,7 +49,7 @@ const AutocorrelationGraph: React.FC<Props> = ({
     }
 
     return (
-        <div style={{ background: '#050505', borderBottom: '1px solid #333', height: '100px', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ background: '#050505', borderBottom: '1px solid #333', height: '120px', display: 'flex', flexDirection: 'column' }}>
             <div style={{ padding: '4px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '0.7rem', color: '#555', letterSpacing: '1px' }}>
                     {autocorrelationGraph.length > 0 ? 'AUTOCORRELATION (LAG)' : 'GLOBAL DENSITY (HEADER)'}

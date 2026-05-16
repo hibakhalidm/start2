@@ -3,12 +3,22 @@
 
 type WorkerRequest =
   | { type: 'init'; id: number }
-  | { type: 'analyze'; id: number; file: File };
+  | { type: 'analyze'; id: number; file: File }
+  | { type: 'cancel'; id: number; targetId: number };
 
 type WorkerResponse =
   | { type: 'ready'; id: number }
   | { type: 'result'; id: number; result: any }
   | { type: 'error'; id: number; error: { message: string; stack?: string } };
+
+// Cooperative-cancellation registry. The main thread posts `cancel` to mark an
+// in-flight `analyze` request id as cancelled; the analyze loop checks this at
+// every await boundary and throws a sentinel error. We cannot interrupt a
+// synchronous WASM call mid-execution — for hard kills the main thread should
+// `worker.terminate()` and respawn (the hook supports that path).
+const cancelledIds = new Set<number>();
+class CancelledError extends Error { constructor() { super('cancelled'); this.name = 'CancelledError'; } }
+function throwIfCancelled(id: number) { if (cancelledIds.has(id)) throw new CancelledError(); }
 
 let wasmMod: any | null = null;
 let wasmInitPromise: Promise<void> | null = null;
@@ -114,8 +124,17 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
       return;
     }
 
+    if (data.type === 'cancel') {
+      // Mark the targeted analyze request as cancelled. Eagerly notify the
+      // client so it can short-circuit without waiting for the next checkpoint.
+      cancelledIds.add(data.targetId);
+      post({ type: 'error', id: data.targetId, error: { message: 'cancelled' } });
+      return;
+    }
+
     if (data.type === 'analyze') {
       await ensureWasmReady();
+      throwIfCancelled(id);
       if (!wasmMod) throw new Error('WASM module not initialized');
 
       const file = data.file;
@@ -129,10 +148,12 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
       const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 
       const readSlice = async (start: number, end: number) => {
+        throwIfCancelled(id);
         const s = clamp(start, 0, fileSize);
         const e = clamp(end, 0, fileSize);
         if (e <= s) return new Uint8Array();
         const buf = await file.slice(s, e).arrayBuffer();
+        throwIfCancelled(id);
         return new Uint8Array(buf);
       };
 
@@ -175,14 +196,20 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
       }
 
       let autocorrelation_graph: number[] = [];
+      let header_signatures: string[] = [];
       try {
         const hdrAnalysis = wasmMod.analyze(header);
         const ac = hdrAnalysis?.autocorrelation_graph;
         if (Array.isArray(ac)) {
           autocorrelation_graph = ac.map((x: unknown) => Number(x));
         }
+        const hs: unknown = hdrAnalysis?.signatures;
+        if (Array.isArray(hs)) {
+          header_signatures = hs.filter((s: unknown) => typeof s === 'string') as string[];
+        }
       } catch {
         autocorrelation_graph = [];
+        header_signatures = [];
       }
 
       // --- 2) Footer read (trailing signatures/footers) ---
@@ -227,6 +254,9 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
       entropy_map.length = RADAR_CHUNKS;
 
       for (let i = 0; i < RADAR_CHUNKS; i++) {
+        // Cancellation checkpoint: ensures user-aborted runs free CPU within
+        // a single chunk's worth of work rather than scanning all 512 chunks.
+        if ((i & 0x1f) === 0) throwIfCancelled(id);
         const chunkStart = Math.floor((i / RADAR_CHUNKS) * fileSize);
         const sample = await readSlice(chunkStart, chunkStart + SAMPLE_BYTES);
         entropy_map[i] = shannonEntropy(sample);
@@ -249,7 +279,11 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
         .map((e, i) => (Number(e) >= ENTROPY_HIGH ? i : -1))
         .filter((i) => i >= 0);
       const crypto_mode = detectCryptoModeFromAutocorr(autocorrelation_graph);
-      const protocol_guess = guessWebProtocol(header, entropy_map);
+      let protocol_guess = guessWebProtocol(header, entropy_map);
+      // Promote vendor heuristic when web protocol is unknown.
+      if (!protocol_guess && header_signatures.includes('VENDOR_PERIODIC_DETECTED')) {
+        protocol_guess = 'VENDOR (Periodic / repeating header)';
+      }
 
       for (const line of trailing_artifacts) {
         if (typeof line === 'string' && line.includes('Resync Event')) {
@@ -257,6 +291,7 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
         }
       }
 
+      throwIfCancelled(id);
       post({
         type: 'result',
         id,
@@ -277,6 +312,12 @@ self.onmessage = async (evt: MessageEvent<WorkerRequest>) => {
 
     throw new Error(`Unknown worker message type: ${(data as any)?.type}`);
   } catch (e: any) {
+    // If the request was cancelled, the cancel handler already notified the
+    // client; avoid posting a duplicate error and just clean up the registry.
+    if (cancelledIds.has(id)) {
+      cancelledIds.delete(id);
+      return;
+    }
     post({
       type: 'error',
       id,
